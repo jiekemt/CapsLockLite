@@ -30,8 +30,16 @@ jobs:
       - name: Self-test
         shell: powershell
         run: |
-          $process = Start-Process -FilePath .\dist\CapsLockLite.exe -ArgumentList '--selftest' -Wait -PassThru
-          Get-Content .\dist\selftest.log
+          # The self-test checks that the config directory is private to the
+          # current user. Hosted runner workspaces inherit a broad ACL, so run
+          # the binary from a dedicated directory with inheritance removed.
+          $test = Join-Path $env:RUNNER_TEMP 'CapsLockLite-selftest'
+          New-Item -ItemType Directory -Force -Path $test | Out-Null
+          icacls $test /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
+          Copy-Item .\dist\CapsLockLite.exe $test
+          $process = Start-Process -FilePath (Join-Path $test 'CapsLockLite.exe') -ArgumentList '--selftest' -Wait -PassThru
+          Get-Content (Join-Path $test 'selftest.log')
+          Copy-Item (Join-Path $test 'selftest.log') .\dist\selftest.log
           if ($process.ExitCode -ne 0) { exit 1 }
 
       - name: Upload binary
