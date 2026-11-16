@@ -1,0 +1,2014 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.IO.Compression;
+using System.Reflection;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+namespace CapsLockLite
+{
+    internal static class SelfTest
+    {
+        private static readonly StringBuilder _log = new StringBuilder();
+        private static int _failed;
+
+        public static void Run()
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest.log");
+            string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            string testRoot = Path.Combine(baseDirectory,
+                "selftest-data-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(testRoot);
+            }
+            catch
+            {
+                testRoot = Path.Combine(Path.GetTempPath(),
+                    "CapsLockLite-selftest-" + Guid.NewGuid().ToString("N"));
+                try { Directory.CreateDirectory(testRoot); }
+                catch { }
+            }
+            try
+            {
+                ConfigStore.UseTestDirectory(testRoot);
+                PluginRuntime.Initialize();
+
+                _log.AppendLine("CapsLock Lite self-test");
+                _log.AppendLine("Time: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                _log.AppendLine("Executable: " + Application.ExecutablePath);
+                _log.AppendLine("ConfigDir: " + ConfigStore.ConfigDirectory);
+                _log.AppendLine();
+                File.WriteAllText(path, _log.ToString(), new UTF8Encoding(false));
+
+                Check("config directory is private", ConfigStore.IsConfigDirectoryPrivate, "");
+
+                TestDefaults();
+                TestRoundTrip();
+                TestRepeat();
+                TestCapsOnly();
+                TestKeyText();
+                TestKeyboard();
+                TestKeyboardLabels();
+                TestKeyboardActions();
+                TestPopupMenu();
+                TestListInteraction();
+                TestListSelection();
+                TestReorderMath();
+                TestMacros();
+                TestKeySendMigration();
+                TestMousePoint();
+                TestInputs();
+                TestMatching();
+                TestConflicts();
+                TestPresets();
+                TestPlugins();
+                TestPluginTrust();
+                TestPluginPackages();
+                TestPluginSettings();
+                TestHook();
+            }
+            catch (Exception ex)
+            {
+                _failed++;
+                _log.AppendLine("FATAL: " + ex);
+            }
+            finally
+            {
+                try { PluginRuntime.Shutdown(); }
+                catch { }
+                try { Directory.Delete(testRoot, true); }
+                catch { }
+            }
+
+            _log.AppendLine();
+            _log.AppendLine(_failed == 0 ? "RESULT: PASS" : "RESULT: FAIL (" + _failed + ")");
+            try { File.WriteAllText(path, _log.ToString(), new UTF8Encoding(false)); }
+            catch { }
+            Environment.ExitCode = _failed == 0 ? 0 : 1;
+        }
+
+        private static void Check(string name, bool condition, string detail)
+        {
+            if (condition)
+            {
+                _log.AppendLine("PASS  " + name);
+            }
+            else
+            {
+                _failed++;
+                _log.AppendLine("FAIL  " + name + "  " + (detail ?? ""));
+            }
+        }
+
+        private static void TestDefaults()
+        {
+            List<KeyMapping> defaults = ActionCatalog.CreateDefaultMappings();
+            Check("default mapping count", defaults.Count >= 55, "count=" + defaults.Count);
+
+            HashSet<string> triggers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool unique = true;
+            bool actionsValid = true;
+            foreach (KeyMapping m in defaults)
+            {
+                string key = m.TriggerText;
+                if (triggers.Contains(key)) unique = false;
+                triggers.Add(key);
+                if (ActionCatalog.Get(m.Action).Id != m.Action) actionsValid = false;
+            }
+            Check("default triggers are unique", unique, triggers.Count + " triggers");
+            Check("default actions are valid", actionsValid, "");
+            Check("default includes F2 calculator", ContainsAction(defaults, "system.calc"), "");
+            Check("default F1 opens the main window",
+                ContainsDefault(defaults, Keys.F1, false, "system.show", ""), "");
+            Check("default Caps+E sends Up", ContainsDefault(defaults, Keys.E, false, "input.keys", "Up"), "");
+        }
+
+        private static bool ContainsAction(List<KeyMapping> list, string action)
+        {
+            foreach (KeyMapping m in list) if (m.Action == action) return true;
+            return false;
+        }
+
+        private static bool ContainsDefault(List<KeyMapping> list, Keys key, bool alt, string action, string param)
+        {
+            foreach (KeyMapping m in list)
+                if (m.KeyCode == key && m.Alt == alt && m.Action == action && m.Param == param) return true;
+            return false;
+        }
+
+        private static void TestRoundTrip()
+        {
+            AppSettings original = ConfigStore.CreateDefault();
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest-settings.json");
+            ConfigStore.Export(original, path);
+            AppSettings restored = ConfigStore.Import(path);
+            Check("config export/import count", restored.Mappings.Count == original.Mappings.Count,
+                restored.Mappings.Count + " vs " + original.Mappings.Count);
+            Check("config export/import action", restored.Mappings.Count > 0 && restored.Mappings[0].Action == original.Mappings[0].Action, "");
+            try { File.Delete(path); }
+            catch { }
+        }
+
+        /// <summary>
+        /// The Caps layer is the only trigger the app accepts, and inside it an
+        /// unbound key must stay silent instead of typing its normal character.
+        /// </summary>
+        private static void TestCapsOnly()
+        {
+            AppSettings settings = new AppSettings();
+            settings.Mappings = new List<KeyMapping>();
+            KeyMapping onlyE = new KeyMapping();
+            onlyE.Caps = true;
+            onlyE.KeyCode = Keys.E;
+            onlyE.Action = "select.up";
+            onlyE.Param = "1";
+            settings.Mappings.Add(onlyE);
+
+            using (HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero))
+            {
+                MethodInfo hook = typeof(HotkeyManager).GetMethod("OnHookKey", BindingFlags.Instance | BindingFlags.NonPublic);
+                hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.CapsLock, true, false, false, 0) });
+                bool unbound = (bool)hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.Z, true, false, false, 0) });
+                Check("unbound key inside the Caps layer is swallowed", unbound, "");
+                hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.Z, false, true, false, 0) });
+                hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.CapsLock, false, true, false, 0) });
+            }
+
+            KeyMapping global = new KeyMapping();
+            global.Caps = false;
+            global.Ctrl = true;
+            global.KeyCode = Keys.K;
+            global.Action = "select.up";
+            AppSettings normalize = new AppSettings();
+            normalize.Mappings = new List<KeyMapping>();
+            normalize.Mappings.Add(global);
+            ConfigStore.Normalize(normalize);
+            Check("legacy global hotkey folds into the Caps layer", global.Caps, "");
+            Check("trigger validation requires the Caps layer",
+                MappingEditorForm.TriggerValidationError(true) == null
+                    && MappingEditorForm.TriggerValidationError(false) != null, "");
+        }
+
+        private static void TestRepeat()
+        {
+            AppSettings settings = new AppSettings();
+            settings.Mappings = ActionCatalog.CreateDefaultMappings();
+            ConfigStore.Normalize(settings);
+            KeyMapping eMapping = null;
+            foreach (KeyMapping m in settings.Mappings)
+            {
+                if (m.KeyCode == Keys.E && m.Caps && !m.Ctrl && !m.Alt) { eMapping = m; break; }
+            }
+            Check("repeat default follows action", eMapping != null && eMapping.TriggerMode == "hold", "");
+            using (HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero))
+            {
+                int started = 0, repeated = 0, ended = 0;
+                manager.HoldStarted += delegate { started++; };
+                manager.HoldRepeated += delegate { repeated++; };
+                manager.HoldEnded += delegate { ended++; };
+                MethodInfo hook = typeof(HotkeyManager).GetMethod("OnHookKey", BindingFlags.Instance | BindingFlags.NonPublic);
+                MethodInfo tick = typeof(HotkeyManager).GetMethod("RepeatTick", BindingFlags.Instance | BindingFlags.NonPublic);
+                hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.CapsLock, true, false, false, 0) });
+                hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.E, true, false, false, 0) });
+                Check("repeat holds the key on first press", started == 1, started.ToString());
+                tick.Invoke(manager, new object[] { null, EventArgs.Empty });
+                Check("repeat keeps reporting while held", repeated == 1, repeated.ToString());
+                hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.E, false, true, false, 0) });
+                tick.Invoke(manager, new object[] { null, EventArgs.Empty });
+                Check("repeat releases once on release", ended == 1 && repeated == 1,
+                    ended + "/" + repeated);
+                hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.CapsLock, false, true, false, 0) });
+            }
+            if (eMapping != null)
+            {
+                eMapping.TriggerMode = "once";
+                using (HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero))
+                {
+                    int count = 0;
+                    manager.ActionTriggered += delegate { count++; };
+                    MethodInfo hook = typeof(HotkeyManager).GetMethod("OnHookKey", BindingFlags.Instance | BindingFlags.NonPublic);
+                    MethodInfo tick = typeof(HotkeyManager).GetMethod("RepeatTick", BindingFlags.Instance | BindingFlags.NonPublic);
+                    hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.CapsLock, true, false, false, 0) });
+                    hook.Invoke(manager, new object[] { new KeyboardEventArgs(Keys.E, true, false, false, 0) });
+                    tick.Invoke(manager, new object[] { null, EventArgs.Empty });
+                    Check("once mode does not repeat", count == 1, count.ToString());
+                }
+            }
+            Check("input.keys is repeatable", ActionCatalog.IsRepeatable("input.keys"), "");
+        }
+
+        private static void CheckDefaults()
+        {
+            // 1.14.4: the shipped defaults come from the user's curated config.
+            List<KeyMapping> list = ActionCatalog.CreateDefaultMappings();
+            Check("default config has the curated size", list.Count == 57, list.Count.ToString());
+
+            bool hasHold = false, hasOnce = false, hasCuratedEnter = false;
+            bool retired = false;
+            HashSet<string> chords = new HashSet<string>(StringComparer.Ordinal);
+            bool duplicate = false;
+            foreach (KeyMapping m in list)
+            {
+                if (m.TriggerMode == "hold") hasHold = true;
+                if (m.TriggerMode == "once") hasOnce = true;
+                if (m.Action == "edit.insert.line.below" || m.Action == "system.reload") retired = true;
+                string chord = (m.Caps ? "C" : "-") + (m.Ctrl ? "c" : "-") + (m.Alt ? "a" : "-")
+                    + (m.Shift ? "s" : "-") + (m.Win ? "w" : "-") + "-" + (int)m.KeyCode;
+                if (!chords.Add(chord)) duplicate = true;
+                if (m.Caps && !m.Ctrl && m.Alt && !m.Shift && !m.Win && m.KeyCode == Keys.Return
+                    && m.Action == "input.keys" && m.Param == "Enter") hasCuratedEnter = true;
+            }
+            Check("defaults carry both trigger modes", hasHold && hasOnce, hasHold + "/" + hasOnce);
+            Check("defaults have no duplicate chords", !duplicate, "");
+            Check("defaults never use retired actions", !retired, "");
+            Check("curated caps+alt+enter is a plain enter", hasCuratedEnter, "");
+            Check("defaults keep their notes",
+                list.Exists(delegate(KeyMapping m) { return m.KeyCode == Keys.W && !m.Alt && m.Note == "向后删除"; }), "");
+        }
+
+        private static void TestKeySendMigration()
+        {            // 1.14.1 folded single-key native actions into input.keys; old configs
+            // and imported macro files still carry the retired ids.
+            KeyMapping mapping = new KeyMapping();
+            mapping.Action = "clipboard.copy";
+            mapping.Param = "";
+            bool migrated = ActionCatalog.MigrateKeySendAction(mapping);
+            Check("retired key action becomes input.keys", migrated && mapping.Action == "input.keys", mapping.Action);
+            Check("retired key action keeps its combo", mapping.Param == "Ctrl + C", mapping.Param);
+
+            MacroStep step = new MacroStep();
+            step.Action = "edit.undo";
+            step.Param = "";
+            bool stepMigrated = ActionCatalog.MigrateKeySendStep(step);
+            Check("retired macro step becomes input.keys", stepMigrated && step.Action == "input.keys", step.Action);
+            Check("retired macro step keeps its combo", step.Param == "Ctrl + Z", step.Param);
+
+            Check("retired action id is gone", ActionCatalog.Get("clipboard.copy").Id == ActionCatalog.None, "");
+            bool retiredListed = false;
+            foreach (ActionDef def in ActionCatalog.All)
+            {
+                if (def.Id == "delete.back" || def.Id == "clipboard.paste") { retiredListed = true; break; }
+            }
+            Check("retired actions are no longer listed", !retiredListed, "");
+
+            KeyMapping live = new KeyMapping();
+            live.Action = "select.up";
+            live.Param = "2";
+            Check("live actions are not migrated", !ActionCatalog.MigrateKeySendAction(live) && live.Action == "select.up", live.Action);
+
+            // 1.14.4 retires two more actions; both have a plain-key replacement so
+            // existing configs keep doing something recognisable.
+            KeyMapping insertLine = new KeyMapping();
+            insertLine.Action = "edit.insert.line.below";
+            Check("retired insert-line becomes enter",
+                ActionCatalog.MigrateKeySendAction(insertLine) && insertLine.Action == "input.keys" && insertLine.Param == "Enter" && insertLine.Note == "回车",
+                insertLine.Action + "/" + insertLine.Param + "/" + insertLine.Note);
+            KeyMapping reload = new KeyMapping();
+            reload.Action = "system.reload";
+            Check("retired reload becomes f5",
+                ActionCatalog.MigrateKeySendAction(reload) && reload.Action == "input.keys" && reload.Param == "F5" && reload.Note == "刷新",
+                reload.Action + "/" + reload.Param + "/" + reload.Note);
+            Check("retired insert-line id is gone", ActionCatalog.Get("edit.insert.line.below").Id == ActionCatalog.None, "");
+            Check("retired reload id is gone", ActionCatalog.Get("system.reload").Id == ActionCatalog.None, "");
+            bool legacyListed = false;
+            foreach (ActionDef def in ActionCatalog.All)
+            {
+                if (def.Id == "edit.insert.line.below" || def.Id == "system.reload") { legacyListed = true; break; }
+            }
+            Check("retired 1.14.4 actions are no longer listed", !legacyListed, "");
+
+            CheckDefaults();
+
+            // The four arrow actions are gone too: they are plain key sends now.
+            KeyMapping arrow = new KeyMapping();
+            arrow.Action = "move.up";
+            arrow.Param = "1";
+            Check("retired arrow becomes input.keys", ActionCatalog.MigrateKeySendAction(arrow) && arrow.Action == "input.keys", arrow.Action);
+            Check("retired arrow gets its name", arrow.Param == "Up" && arrow.Note == "上移", arrow.Param + "/" + arrow.Note);
+            Check("retired arrow id is gone", ActionCatalog.Get("move.up").Id == ActionCatalog.None, "");
+
+            // The list shows the note when present, otherwise the combination
+            // itself; the generic action name never appears on a key-send row.
+            KeyMapping noted = new KeyMapping();
+            noted.Action = "input.keys";
+            noted.Param = "Ctrl + C";
+            noted.Note = "复制";
+            Check("key-send row prefers its note", ActionCatalog.Describe(noted) == "复制", ActionCatalog.Describe(noted));
+            noted.Note = "";
+            Check("key-send row falls back to the combo", ActionCatalog.Describe(noted) == "Ctrl + C", ActionCatalog.Describe(noted));
+            noted.Param = "";
+            Check("key-send row without anything says what it is", ActionCatalog.Describe(noted) == "发送按键", ActionCatalog.Describe(noted));
+
+            // Mouse clicks accept a note too; other actions show their own name
+            // and drop any stale note when the config is normalised.
+            KeyMapping click = new KeyMapping();
+            click.Action = "mouse.click";
+            click.Param = "L;10;20";
+            click.Note = "点开菜单";
+            Check("mouse row prefers its note", ActionCatalog.Describe(click) == "点开菜单", ActionCatalog.Describe(click));
+            click.Note = "";
+            Check("mouse row falls back to its description",
+                ActionCatalog.Describe(click).IndexOf("鼠标", StringComparison.Ordinal) >= 0,
+                ActionCatalog.Describe(click));
+
+            AppSettings scope = new AppSettings();
+            KeyMapping keep = new KeyMapping();
+            keep.Action = "mouse.click";
+            keep.Param = "L;10;20";
+            keep.Note = "  点开菜单  ";
+            KeyMapping drop = new KeyMapping();
+            drop.Action = "select.up";
+            drop.Param = "2";
+            drop.Note = "不该留下";
+            scope.Mappings.Add(keep);
+            scope.Mappings.Add(drop);
+            ConfigStore.Normalize(scope);
+            Check("normalise keeps notes only where they are shown",
+                scope.Mappings.Count == 2
+                && scope.Mappings[0].Note == "点开菜单"
+                && scope.Mappings[1].Note == "",
+                scope.Mappings.Count + ":" + (scope.Mappings.Count > 0 ? scope.Mappings[0].Note : "") + "/"
+                + (scope.Mappings.Count > 1 ? scope.Mappings[1].Note : ""));
+
+            // Saving an edit must copy the whole candidate: field-by-field copy
+            // is how the note silently stopped being written back.
+            KeyMapping edited = new KeyMapping();
+            edited.Id = "same-id";
+            edited.KeyCode = Keys.W;
+            edited.Action = "input.keys";
+            edited.Param = "Up";
+            KeyMapping candidateRow = new KeyMapping();
+            candidateRow.Id = "same-id";
+            candidateRow.KeyCode = Keys.W;
+            candidateRow.Action = "input.keys";
+            candidateRow.Param = "Up";
+            candidateRow.Note = "上移（已命名）";
+            edited.CopyFrom(candidateRow);
+            Check("copy-back keeps the note", edited.Note == "上移（已命名）", edited.Note);
+        }
+
+        private static void TestKeyText()
+        {
+            bool ctrl, alt, shift, win;
+            Keys key;
+            bool ok = KeyText.TryParseCombo("Ctrl + Shift + Left", out ctrl, out alt, out shift, out win, out key);
+            Check("parse combo", ok && ctrl && shift && !alt && !win && key == Keys.Left, "");
+            string text = KeyText.FormatTrigger(new KeyMapping { Caps = true, Alt = true, KeyCode = Keys.E });
+            Check("format trigger", text == "Caps + Alt + E", text);
+
+            Keys[] arrows = { Keys.Up, Keys.Down, Keys.Left, Keys.Right };
+            bool arrowsRoundTrip = true;
+            for (int i = 0; i < arrows.Length; i++)
+            {
+                Keys parsed;
+                bool c3, a3, s3, w3;
+                string combo = KeyText.FormatCombo(true, false, false, false, arrows[i]);
+                bool okArrow = KeyText.TryParseCombo(combo, out c3, out a3, out s3, out w3, out parsed);
+                if (!okArrow || parsed != arrows[i] || !c3) arrowsRoundTrip = false;
+            }
+            Check("arrow keys survive a combo round-trip", arrowsRoundTrip, "");
+            Keys glyphKey;
+            bool g2, g3, g4, g5;
+            bool glyphOk = KeyText.TryParseCombo("Ctrl + ↑", out g2, out g3, out g4, out g5, out glyphKey);
+            Check("arrow glyph parses as a send key", glyphOk && glyphKey == Keys.Up && g2, "Ctrl + ↑");
+
+            bool numpadRoundTrip = true;
+            string numpadDetail = "";
+            for (int i = 0; i <= 9; i++)
+            {
+                Keys numpad = (Keys)((int)Keys.NumPad0 + i);
+                Keys parsedNumpad;
+                bool c6, a6, s6, w6;
+                string combo = KeyText.FormatCombo(false, false, false, false, numpad);
+                if (!KeyText.TryParseCombo(combo, out c6, out a6, out s6, out w6, out parsedNumpad)
+                    || parsedNumpad != numpad)
+                {
+                    numpadRoundTrip = false;
+                    numpadDetail = "failed at " + combo;
+                    break;
+                }
+            }
+            Check("numpad digits survive a combo round-trip", numpadRoundTrip, numpadDetail);
+
+            Keys numpadAlt;
+            bool n1, n2, n3, n4;
+            bool numpadNames = KeyText.TryParseCombo("NumPad 8", out n1, out n2, out n3, out n4, out numpadAlt)
+                && numpadAlt == Keys.NumPad8
+                && KeyText.ParseKeyName("numpad8") == Keys.NumPad8
+                && KeyText.ParseKeyName("Num 3") == Keys.NumPad3;
+            Check("numpad names parse in every spelling", numpadNames, "");
+        }
+
+        private static void TestKeyboard()
+        {
+            List<KeyCap> caps = KeyboardLayout.Create();
+            Check("keyboard layout is 104 keys", caps.Count == 104, "count=" + caps.Count);
+
+            bool inside = true;
+            bool noNone = true;
+            bool labelled = true;
+            for (int i = 0; i < caps.Count; i++)
+            {
+                KeyCap cap = caps[i];
+                if (cap.X < 0f || cap.Y < 0f
+                    || cap.X + cap.Width > KeyboardLayout.TotalWidth + 0.001f
+                    || cap.Y + cap.Height > KeyboardLayout.TotalHeight + 0.001f)
+                    inside = false;
+                if (cap.Code == Keys.None) noNone = false;
+                if (string.IsNullOrEmpty(cap.Label) && cap.Code != Keys.Space) labelled = false;
+            }
+            Check("keyboard keys stay inside the canvas", inside, "");
+            Check("keyboard keys carry a real key code", noNone, "");
+            Check("keyboard keys are labelled", labelled, "");
+
+            bool overlapping = false;
+            for (int i = 0; i < caps.Count && !overlapping; i++)
+            {
+                for (int j = i + 1; j < caps.Count; j++)
+                {
+                    if (Overlaps(caps[i], caps[j]))
+                    {
+                        overlapping = true;
+                        break;
+                    }
+                }
+            }
+            Check("keyboard keys never overlap", !overlapping, "");
+
+            Check("keyboard has the five modifier groups",
+                CountModifier(caps, KeyModifier.Caps) == 1
+                    && CountModifier(caps, KeyModifier.Ctrl) == 2
+                    && CountModifier(caps, KeyModifier.Alt) == 2
+                    && CountModifier(caps, KeyModifier.Shift) == 2
+                    && CountModifier(caps, KeyModifier.Win) == 2,
+                "");
+
+            using (Font twoLineFont = KeyLabel.CreatePixelFont(11f))
+            {
+                int[] rows = MKeyboardView.TwoLineRowHeights(twoLineFont, twoLineFont);
+                int needed = TextRenderer.MeasureText("Page", twoLineFont).Height;
+                Check("two-line key labels leave room for descenders",
+                    rows[0] >= needed && rows[1] >= needed,
+                    rows[0] + "/" + rows[1] + " vs " + needed);
+            }
+
+            KeyMapping capsE = new KeyMapping();
+            capsE.Caps = true;
+            capsE.KeyCode = Keys.E;
+
+            KeyMapping capsAltE = new KeyMapping();
+            capsAltE.Caps = true;
+            capsAltE.Alt = true;
+            capsAltE.KeyCode = Keys.E;
+
+            KeyMapping globalK = new KeyMapping();
+            globalK.Caps = false;
+            globalK.Ctrl = true;
+            globalK.KeyCode = Keys.K;
+
+            Check("preview filter: no selection marks nothing",
+                !KeyboardFilter.Exact(capsE, false, false, false, false, false)
+                    && !KeyboardFilter.Exact(capsAltE, false, false, false, false, false)
+                    && !KeyboardFilter.Exact(globalK, false, false, false, false, false), "");
+            Check("preview filter: Caps marks only plain Caps chords",
+                KeyboardFilter.Exact(capsE, true, false, false, false, false)
+                    && !KeyboardFilter.Exact(capsAltE, true, false, false, false, false), "");
+            Check("preview filter: Caps does not mark Caps + Alt",
+                !KeyboardFilter.Exact(capsAltE, true, false, false, false, false), "");
+            Check("preview filter: Caps + Alt marks only Alt chords",
+                !KeyboardFilter.Exact(capsE, true, false, true, false, false)
+                    && KeyboardFilter.Exact(capsAltE, true, false, true, false, false), "");
+            Check("preview filter: exact chord excludes global hotkeys",
+                !KeyboardFilter.Exact(globalK, true, false, false, false, false)
+                    && KeyboardFilter.Exact(globalK, false, true, false, false, false), "");
+            Check("list filter: no selection keeps every row",
+                KeyboardFilter.Matches(capsE, false, false, false, false, false)
+                    && KeyboardFilter.Matches(globalK, false, false, false, false, false), "");
+
+            KeyCap e = null;
+            for (int i = 0; i < caps.Count; i++)
+            {
+                if (caps[i].Code == Keys.E) { e = caps[i]; break; }
+            }
+            Check("preview layout maps the E key", e != null && e.Covers(Keys.E), "");
+        }
+
+        private static bool Overlaps(KeyCap a, KeyCap b)
+        {
+            return a.X < b.X + b.Width - 0.001f
+                && b.X < a.X + a.Width - 0.001f
+                && a.Y < b.Y + b.Height - 0.001f
+                && b.Y < a.Y + a.Height - 0.001f;
+        }
+
+        private static int CountModifier(List<KeyCap> caps, KeyModifier modifier)
+        {
+            int count = 0;
+            for (int i = 0; i < caps.Count; i++)
+                if (caps[i].Modifier == modifier) count++;
+            return count;
+        }
+
+        private static void TestKeyboardLabels()
+        {
+            // Sweep the whole range rather than a few sample sizes: the label size
+            // follows the key width, but GDI quantises fonts, so a boundary width
+            // can still clip a name even when its neighbours are fine.
+            List<string> failures = new List<string>();
+            for (int width = 560; width <= 1600; width += 20)
+            {
+                List<string> bad = KeyboardLabelAudit.Truncated(width);
+                for (int i = 0; i < bad.Count; i++)
+                {
+                    string entry = width.ToString() + ":" + bad[i];
+                    if (!failures.Contains(entry)) failures.Add(entry);
+                }
+            }
+            Check("key labels fit at every page width 560-1600",
+                failures.Count == 0, string.Join(", ", failures.ToArray()));
+
+            // Digit caps print the shift symbol beside the digit as one label
+            // string. The old stack needed two line boxes on a 1u cap and its digit
+            // row was clipped by the cap's lower edge at some key sizes.
+            List<KeyCap> caps = KeyboardLayout.Create();
+            float unit = Math.Max(4f, 892f - Theme.S(2) * 2) / KeyboardLayout.TotalWidth;
+            float gap = Math.Max(1f, unit * 0.03f);
+            Font label = null;
+            Font small = null;
+            Font tiny = null;
+            KeyLabel.CreateFonts(unit, out label, out small, out tiny);
+            try
+            {
+                List<string> wrong = new List<string>();
+                int digitCaps = 0;
+                for (int i = 0; i < caps.Count; i++)
+                {
+                    KeyCap cap = caps[i];
+                    if (cap.Label.Length < 3 || cap.Label[1] != ' ') continue;
+                    digitCaps++;
+
+                    int width = (int)(cap.Width * unit - gap * 2f) + 2;
+                    float faceHeight = cap.Height * unit - gap * 2f;
+                    float depth = Math.Min(faceHeight * 0.10f, Math.Max(1.5f, unit * 0.06f));
+                    KeyLabelPlan plan = KeyLabel.Plan(cap, width, faceHeight - depth,
+                        label, small, tiny);
+                    // One row in the largest face that fits: the pair must not drop
+                    // to the stacked fallback on a 1u cap at the default width.
+                    if (plan.Kind != KeyLabelKind.Full) wrong.Add(cap.Label + ":" + plan.Kind);
+                }
+                Check("digit caps keep symbol and digit on one row",
+                    digitCaps == 13 && wrong.Count == 0,
+                    "caps=" + digitCaps + " " + string.Join(", ", wrong.ToArray()));
+            }
+            finally
+            {
+                label.Dispose();
+                small.Dispose();
+                tiny.Dispose();
+            }
+        }
+
+        private static void TestKeyboardActions()
+        {
+            // The default page is 892 px wide. A short name must reach every single
+            // cap there, including the wide and the double-height numpad keys: the
+            // action fit is per key, not per "key type that happens to be used".
+            List<string> missing = KeyboardLabelAudit.ActionProblems(892, "上移", true);
+            Check("every key can show a short action name at the default width",
+                missing.Count == 0, string.Join(", ", missing.ToArray()));
+
+            List<string> longNames = KeyboardLabelAudit.ActionProblems(
+                892, "打开主界面并聚焦搜索框", false);
+            Check("long action names stay inside every cap",
+                longNames.Count == 0, string.Join(", ", longNames.ToArray()));
+
+            // A font boundary must not let the name leave the cap at another width.
+            List<string> failures = new List<string>();
+            for (int width = 700; width <= 1400; width += 50)
+            {
+                List<string> bad = KeyboardLabelAudit.ActionProblems(width, "选中当前单词", false);
+                for (int i = 0; i < bad.Count; i++)
+                {
+                    string entry = width.ToString() + ":" + bad[i];
+                    if (!failures.Contains(entry)) failures.Add(entry);
+                }
+            }
+            Check("action names fit at every page width 700-1400",
+                failures.Count == 0, string.Join(", ", failures.ToArray()));
+
+            using (Font font = KeyLabel.CreatePixelFont(7f))
+            {
+                string fitted = KeyActionText.Ellipsize("打开主界面并聚焦搜索框", font, 30);
+                Check("ellipsis keeps the widest visible prefix",
+                    fitted != null && fitted.EndsWith("…")
+                        && Theme.Measure(fitted, font).Width <= 30, fitted);
+            }
+
+            // The audit above works in key units; this one runs the real control's
+            // layout at real pixel sizes and checks the drawn rectangles.
+            List<KeyMapping> mappings = ActionCatalog.CreateDefaultMappings();
+            List<string> problems = new List<string>();
+            int[] widths = { 700, 892, 1100, 1280 };
+            using (MKeyboardView view = new MKeyboardView())
+            {
+                foreach (int width in widths)
+                {
+                    int height = (int)Math.Round(width
+                        * (double)KeyboardLayout.TotalHeight / KeyboardLayout.TotalWidth);
+                    view.Size = new Size(width, height);
+                    view.SetMappings(mappings);
+                    view.SetFilter(true, false, false, false, false);
+                    List<string> found = view.LayoutProblems();
+                    for (int i = 0; i < found.Count; i++)
+                    {
+                        string entry = width.ToString() + ":" + found[i];
+                        if (!problems.Contains(entry)) problems.Add(entry);
+                    }
+                }
+            }
+            Check("board action names fit the real cap rectangles",
+                problems.Count == 0, string.Join(", ", problems.ToArray()));
+
+            using (MKeyboardView view = new MKeyboardView())
+            {
+                view.Size = new Size(892, 238);
+                view.SetMappings(mappings);
+                view.SetFilter(false, false, false, false, false);
+                Check("neutral board marks used keys", view.MarkedKeyCount > 0,
+                    view.MarkedKeyCount.ToString());
+                Check("neutral board counts every chord on a key",
+                    view.ActionCount(Keys.E) == CountKey(mappings, Keys.E),
+                    view.ActionCount(Keys.E) + " vs " + CountKey(mappings, Keys.E));
+                Check("neutral board shows no action names",
+                    !view.HasActionOn(Keys.E), "");
+                view.SetSelectedKey(Keys.E);
+                Check("neutral key can be selected for the list",
+                    view.SelectedKey == Keys.E, view.SelectedKey.ToString());
+                view.SetFilter(true, false, false, false, false);
+                Check("Caps marks a subset of the board", view.MarkedKeyCount > 0
+                    && view.MarkedKeyCount < 104, view.MarkedKeyCount.ToString());
+                Check("filtered board shows the action name", view.HasActionOn(Keys.E), "");
+            }
+
+            using (MKeyboardView view = new MKeyboardView())
+            {
+                view.Size = new Size(892, 238);
+                KeyMapping enabled = new KeyMapping();
+                enabled.Caps = true;
+                enabled.KeyCode = Keys.Y;
+                enabled.Action = "select.up";
+                enabled.Param = "1";
+
+                KeyMapping disabled = new KeyMapping();
+                disabled.Caps = true;
+                disabled.KeyCode = Keys.U;
+                disabled.Action = "move.down";
+                disabled.Param = "1";
+                disabled.Enabled = false;
+
+                view.SetMappings(new List<KeyMapping> { enabled, disabled });
+                view.SetFilter(true, false, false, false, false);
+                Check("disabled shortcut is counted as disabled",
+                    view.DisabledKeyCount == 1, view.DisabledKeyCount.ToString());
+                Check("disabled shortcut still names its action", view.HasActionOn(Keys.U), "");
+                Check("enabled shortcut is not marked disabled",
+                    view.HasActionOn(Keys.Y), "");
+
+                view.SetFilter(false, false, false, false, false);
+                Check("neutral count includes disabled shortcuts",
+                    view.ActionCount(Keys.U) == 1, view.ActionCount(Keys.U).ToString());
+                Check("neutral board hides disabled action names",
+                    !view.HasActionOn(Keys.U), "");
+            }
+
+            // A double-click must never be swallowed: with no chord there is no
+            // editor to open, so both clicks toggle (select, then deselect). With a
+            // chord the second click keeps the key selected for the editor.
+            using (MKeyboardView view = new MKeyboardView())
+            {
+                view.Size = new Size(892, 238);
+                view.SetMappings(mappings);
+
+                Keys neutralFirst = view.ClickKey(Keys.A, 1000);
+                Keys neutralSecond = view.ClickKey(Keys.A, 1080);
+                Check("neutral double-click selects then deselects",
+                    neutralFirst == Keys.A && neutralSecond == Keys.None,
+                    neutralFirst + " -> " + neutralSecond);
+
+                view.SetFilter(true, false, false, false, false);
+                Keys chordFirst = view.ClickKey(Keys.A, 20000);
+                Keys chordSecond = view.ClickKey(Keys.A, 20080);
+                Check("chord double-click keeps the key selected",
+                    chordFirst == Keys.A && chordSecond == Keys.A,
+                    chordFirst + " -> " + chordSecond);
+
+                // Activation must not wait for the system window: only a quick pair
+                // counts as a double-click, and a slower pair is two ordinary clicks.
+                view.ClickKey(Keys.A, 40000);
+                Check("quick second click counts as a double-click",
+                    view.DoubleClickForTest(Keys.A, 40250), "");
+                view.ClickKey(Keys.A, 50000);
+                Check("slow second click does not count as a double-click",
+                    !view.DoubleClickForTest(Keys.A, 50480), "");
+                Keys slowFirst = view.ClickKey(Keys.A, 60000);
+                Keys slowSecond = view.ClickKey(Keys.A, 60400);
+                Check("chord clicks 400 ms apart toggle instead of activating",
+                    slowFirst == Keys.A && slowSecond == Keys.None,
+                    slowFirst + " -> " + slowSecond);
+
+                // Activation must survive a stale selection: after a drag the first
+                // click of the pair can toggle the cap off, and the double-click still
+                // has to open the editor for that same cap.
+                int activations = 0;
+                view.KeyActivated += delegate { activations++; };
+                view.SetFilter(false, true, false, false, false);
+                Keys picked = view.ClickKey(Keys.B, 70000);
+                Check("chord click selects the key", picked == Keys.B, "");
+                Check("double-click opens the editor on the selected cap",
+                    view.ActivateCapForTest(Keys.B) && view.SelectedKey == Keys.B && activations == 1,
+                    "activations=" + activations);
+                view.ClickKey(Keys.B, 80000);
+                Check("double-click re-selects the cap after the first click cleared it",
+                    view.ActivateCapForTest(Keys.B) && view.SelectedKey == Keys.B && activations == 2,
+                    "activations=" + activations);
+                view.SetFilter(false, false, false, false, false);
+                Check("neutral overview never activates a cap",
+                    !view.ActivateCapForTest(Keys.B) && activations == 2,
+                    "activations=" + activations);
+
+                // Pressing a used cap in a chord arms a drag and the click only lands
+                // on release; that press must not erase the double-click pair, or the
+                // editor never opens for a marked key.
+                view.SetFilter(true, false, false, false, false);
+                view.ClickKey(Keys.C, 90000);
+                view.ArmDragForTest(Keys.C);
+                Check("arming a drag keeps the double-click pair",
+                    view.DoubleClickForTest(Keys.C, 90120), "");
+                view.CancelDrag();
+            }
+
+            // Dragging a used key inside a chord reports the pair once, and a drop
+            // on the source key itself is never a move.
+            using (MKeyboardView view = new MKeyboardView())
+            {
+                view.Size = new Size(892, 238);
+                Check("dragging a key reports the drop pair",
+                    view.SimulateKeyDrag(Keys.A, Keys.B), "");
+                Check("dropping on the source key is not a move",
+                    !view.SimulateKeyDrag(Keys.A, Keys.A), "");
+
+                // The drop used to leave the board in a state where the first click
+                // of a pair toggled the selection off and the activation bailed out:
+                // a quick second click after a drag must still open the editor.
+                view.SetMappings(mappings);
+                view.SetFilter(true, false, false, false, false);
+                Keys afterDrag = view.ClickKey(Keys.B, 30000);
+                Check("double-click still activates after a drag",
+                    afterDrag == Keys.B && view.DoubleClickForTest(Keys.B, 30150), "");
+            }
+        }
+
+        private static int CountKey(List<KeyMapping> mappings, Keys key)
+        {
+            int count = 0;
+            foreach (KeyMapping mapping in mappings)
+                if (mapping.KeyCode == key) count++;
+            return count;
+        }
+
+        private sealed class StubRow : MListItem
+        {
+            public override void Paint(Graphics g, Rectangle bounds, bool selected,
+                bool hovered, bool enabled)
+            {
+            }
+
+            public override Rectangle ToggleBounds(Rectangle bounds)
+            {
+                return new Rectangle(bounds.Right - 40, bounds.Y + (bounds.Height - 20) / 2,
+                    40, 20);
+            }
+        }
+
+        private static void TestPopupMenu()
+        {
+            // The popup must be cut to its rounded card by the window region: a
+            // rounded border alone leaves the surface visible in the corners.
+            using (MPopupMenu menu = new MPopupMenu())
+            {
+                menu.AddItem("编辑…", "Enter", null);
+                menu.AddSeparator();
+                menu.AddItem("删除", "Del", null);
+                menu.Size = new Size(200, 140);
+
+                bool shaped = menu.Region != null
+                    && !menu.Region.IsVisible(0f, 0f)
+                    && !menu.Region.IsVisible(199f, 0f)
+                    && !menu.Region.IsVisible(0f, 139f)
+                    && menu.Region.IsVisible(100f, 70f);
+                Check("popup menu is clipped to its rounded card", shaped,
+                    menu.Region == null ? "no region" : "region set");
+            }
+        }
+
+        private static void TestListInteraction()
+        {
+            using (MListView list = new MListView())
+            {
+                list.Size = new Size(400, 220);
+                list.RowHeight = 30;
+                list.SetItems(new List<MListItem> { new StubRow(), new StubRow() });
+
+                int activated = 0;
+                int contexts = 0;
+                list.ItemActivated += delegate { activated++; };
+                list.ItemContextRequested += delegate { contexts++; };
+
+                Point row = new Point(50, 12);   // first row: RowTop is 4 px
+                list.SimulateDoubleClick(MouseButtons.Left, row);
+                bool leftEdits = activated == 1;
+                list.SimulateDoubleClick(MouseButtons.Right, row);
+                bool rightDoesNotEdit = activated == 1;
+                Check("right double-click never opens the editor",
+                    leftEdits && rightDoesNotEdit, "activated=" + activated);
+
+                list.SimulateMouseDown(MouseButtons.Right, row);
+                bool menuOnRight = contexts == 1 && list.SelectedIndex == 0;
+                list.SimulateMouseDown(MouseButtons.Left, row);
+                bool menuOnlyOnRight = contexts == 1;
+                Check("right click on a row requests the row menu",
+                    menuOnRight && menuOnlyOnRight, "contexts=" + contexts);
+
+                Check("multi-select and reorder are opt-in",
+                    !list.MultiSelect && !list.AllowReorder,
+                    "multi=" + list.MultiSelect + " reorder=" + list.AllowReorder);
+            }
+        }
+
+        /// <summary>
+        /// Ctrl / Shift / Ctrl+A on the list, plus the rule that a plain press on
+        /// an already selected row keeps the block until the mouse comes up.
+        /// </summary>
+        private static void TestListSelection()
+        {
+            using (MListView list = new MListView())
+            {
+                list.Size = new Size(400, 260);
+                list.RowHeight = 30;
+                list.MultiSelect = true;
+                list.AllowReorder = true;
+                List<MListItem> rows = new List<MListItem>();
+                for (int i = 0; i < 5; i++) rows.Add(new StubRow());
+                list.SetItems(rows);
+
+                Point p0 = new Point(50, 4 + 15);
+                Point p2 = new Point(50, 4 + 30 * 2 + 15);
+                Point p4 = new Point(50, 4 + 30 * 4 + 15);
+                Point p1 = new Point(50, 4 + 30 + 15);
+
+                list.SimulateMouseDown(MouseButtons.Left, p0, Keys.Control);
+                list.SimulateMouseUp(p0);
+                bool one = list.SelectedCount == 1 && list.IsSelected(0);
+
+                list.SimulateMouseDown(MouseButtons.Left, p2, Keys.Control);
+                list.SimulateMouseUp(p2);
+                bool two = list.SelectedCount == 2 && list.IsSelected(0) && list.IsSelected(2);
+
+                list.SimulateMouseDown(MouseButtons.Left, p4, Keys.Shift);
+                list.SimulateMouseUp(p4);
+                bool range = list.SelectedCount == 3 && !list.IsSelected(0)
+                    && list.IsSelected(2) && list.IsSelected(3) && list.IsSelected(4);
+
+                list.SimulateKeyDown(Keys.A, true, false);
+                bool all = list.SelectedCount == 5;
+
+                list.SimulateMouseDown(MouseButtons.Left, p1, Keys.Control);
+                list.SimulateMouseUp(p1);
+                bool toggled = list.SelectedCount == 4 && !list.IsSelected(1);
+
+                // Plain press on a row inside the block keeps the block until
+                // release; release collapses to that row.
+                list.SimulateKeyDown(Keys.A, true, false);
+                list.SimulateMouseDown(MouseButtons.Left, p2);
+                bool keptOnPress = list.SelectedCount == 5;
+                list.SimulateMouseUp(p2);
+                bool collapseOnRelease = list.SelectedCount == 1 && list.IsSelected(2);
+
+                Check("ctrl/shift/ctrl+a multi-select on the list",
+                    one && two && range && all && toggled && keptOnPress && collapseOnRelease,
+                    "one=" + one + " two=" + two + " range=" + range + " all=" + all
+                    + " toggle=" + toggled + " press=" + keptOnPress + " release=" + collapseOnRelease);
+
+                // A switch belongs to its own row, even inside a block selection.
+                list.SimulateKeyDown(Keys.A, true, false);
+                int toggles = 0;
+                int toggledIndex = -9;
+                list.ItemToggleRequested += delegate
+                {
+                    toggles++;
+                    toggledIndex = list.ToggleHotspotIndex;
+                };
+                list.SimulateMouseDown(MouseButtons.Left, new Point(380, 4 + 30 * 3 + 15));
+                bool switchIndex = toggles == 1 && toggledIndex == 3 && list.SelectedCount == 5;
+
+                // Space asks for the lead row, not the whole block.
+                list.SimulateKeyDown(Keys.Space, false, false);
+                bool spaceIndex = toggles == 2 && toggledIndex == list.SelectedIndex;
+                Check("switch click and Space point at one row", switchIndex && spaceIndex,
+                    "toggles=" + toggles + " index=" + toggledIndex
+                    + " lead=" + list.SelectedIndex + " selected=" + list.SelectedCount);
+            }
+        }
+
+        /// <summary>
+        /// The block reorder used by the list: a contiguous block of rows keeps
+        /// its internal order, and rows around it shift by the block size.
+        /// </summary>
+        private static void TestReorderMath()
+        {
+            List<string> items = new List<string> { "a", "b", "c", "d", "e" };
+            MListReorder.Move(items, 1, 2, 4);
+            bool down = string.Join("", items.ToArray()) == "adbce";
+
+            List<string> back = new List<string> { "a", "d", "b", "c", "e" };
+            MListReorder.Move(back, 2, 2, 0);
+            bool up = string.Join("", back.ToArray()) == "bcade";
+
+            bool slots = MListReorder.TargetStart(1, 2, 4) == 2
+                && MListReorder.TargetStart(2, 2, 0) == 0
+                && MListReorder.MoveIndex(1, 1, 2, 4) == 2
+                && MListReorder.MoveIndex(3, 1, 2, 4) == 1;
+            Check("reorder moves a block without scrambling it", down && up && slots,
+                "down=" + down + " up=" + up + " slots=" + slots);
+
+            using (MListView list = new MListView())
+            {
+                list.Size = new Size(400, 260);
+                list.RowHeight = 30;
+                list.MultiSelect = true;
+                list.AllowReorder = true;
+                List<MListItem> rows = new List<MListItem>();
+                for (int i = 0; i < 5; i++) rows.Add(new StubRow());
+                list.SetItems(rows);
+
+                int from = 0, count = 0, to = -1;
+                list.ItemsReordered += delegate(object sender, MListReorderEventArgs e)
+                {
+                    from = e.From;
+                    count = e.Count;
+                    to = e.To;
+                };
+
+                MListItem dragged = rows[0];
+                list.SimulateMouseDown(MouseButtons.Left, new Point(50, 4 + 15));
+                list.SimulateMouseMove(new Point(50, 80));
+                list.SimulateMouseMove(new Point(50, 160));
+                list.SimulateMouseUp(new Point(50, 160));
+
+                bool fired = from == 0 && count == 1 && to == 4;
+                bool order = list.Items.Count == 5 && list.Items[4] == dragged
+                    && list.IsSelected(4);
+                Check("dragging a row reorders it and reports the drop",
+                    fired && order, "from=" + from + " count=" + count + " to=" + to);
+
+                // A multi-row block travels as one piece.
+                List<MListItem> more = new List<MListItem>();
+                for (int i = 0; i < 5; i++) more.Add(new StubRow());
+                list.SetItems(more);
+                list.SimulateMouseDown(MouseButtons.Left, new Point(50, 4 + 15), Keys.Control);
+                list.SimulateMouseUp(new Point(50, 4 + 15));
+                list.SimulateMouseDown(MouseButtons.Left, new Point(50, 4 + 30 + 15), Keys.Control);
+                list.SimulateMouseUp(new Point(50, 4 + 30 + 15));
+
+                from = 0;
+                count = 0;
+                to = -1;
+                list.SimulateMouseDown(MouseButtons.Left, new Point(50, 4 + 15));
+                list.SimulateMouseMove(new Point(50, 90));
+                list.SimulateMouseMove(new Point(50, 170));
+                list.SimulateMouseUp(new Point(50, 170));
+
+                bool blockFired = from == 0 && count == 2 && to == 3;
+                bool blockOrder = list.Items.Count == 5
+                    && list.Items[3] == more[0] && list.Items[4] == more[1]
+                    && list.SelectedCount == 2 && list.IsSelected(3) && list.IsSelected(4);
+                Check("dragging several rows keeps their order",
+                    blockFired && blockOrder,
+                    "from=" + from + " count=" + count + " to=" + to);
+
+                // The gesture lives only while the left button is held: after the
+                // release the block must stop following the pointer.
+                List<MListItem> release = new List<MListItem>();
+                for (int i = 0; i < 5; i++) release.Add(new StubRow());
+                list.SetItems(release);
+                from = -1;
+                count = 0;
+                to = -1;
+                list.SimulateMouseDown(MouseButtons.Left, new Point(50, 4 + 15));
+                list.SimulateMouseMove(new Point(50, 90));
+                bool midDrag = list.Dragging;
+                list.SimulateMouseUp(new Point(50, 90));
+                bool ended = !list.Dragging && from == 0 && to == 1;
+                list.SimulateMouseMove(new Point(50, 190));
+                bool noGhost = !list.Dragging && to == 1;
+                Check("releasing the left button ends the drag",
+                    midDrag && ended && noGhost,
+                    "mid=" + midDrag + " ended=" + ended + " to=" + to + " ghost=" + !noGhost);
+
+                // A right-button gesture opens the menu; it never arms a drag.
+                list.SetItems(release);
+                from = -1;
+                to = -1;
+                list.SimulateMouseDown(MouseButtons.Right, new Point(50, 4 + 15));
+                list.SimulateMouseMove(new Point(50, 150));
+                list.SimulateMouseUp(new Point(50, 150));
+                Check("right button never starts a drag", !list.Dragging && to == -1, "to=" + to);
+            }
+        }
+
+        /// <summary>
+        /// Macro model: loading must repair broken files, nesting validation must
+        /// stop cycles before a run starts, and registered macros must resolve as
+        /// normal actions (binding depends on that).
+        /// </summary>
+        private static void TestMousePoint()
+        {
+            MouseClickPoint point = MouseClickPoint.Parse("R;120;-40");
+            Check("mouse point parses button and coordinates",
+                point.Button == MouseClickButton.Right && point.X == 120 && point.Y == -40,
+                MouseClickPoint.Format(point));
+            Check("mouse point ignores the retired restore flag",
+                MouseClickPoint.Format(MouseClickPoint.Parse("R;120;-40;1")) == "R;120;-40",
+                MouseClickPoint.Format(MouseClickPoint.Parse("R;120;-40;1")));
+            MouseClickPoint legacy = MouseClickPoint.Parse("12,34");
+            Check("mouse point accepts legacy comma form",
+                legacy.Button == MouseClickButton.Left && legacy.X == 12 && legacy.Y == 34,
+                MouseClickPoint.Format(legacy));
+            Check("mouse point clamps coordinates",
+                MouseClickPoint.Parse("L;99999;-99999").X == 32767 &&
+                MouseClickPoint.Parse("L;99999;-99999").Y == -32768,
+                MouseClickPoint.Format(MouseClickPoint.Parse("L;99999;-99999")));
+
+            MouseClickPoint withMods = MouseClickPoint.Parse("R;120;-40;CS");
+            Check("mouse point keeps held modifiers",
+                withMods.Button == MouseClickButton.Right && withMods.Ctrl && withMods.Shift
+                    && !withMods.Alt && !withMods.Win
+                    && MouseClickPoint.Format(withMods) == "R;120;-40;CS",
+                MouseClickPoint.Format(withMods));
+            Check("mouse point drops an empty modifier segment",
+                MouseClickPoint.Format(MouseClickPoint.Parse("L;5;6;")) == "L;5;6",
+                MouseClickPoint.Format(MouseClickPoint.Parse("L;5;6;")));
+            MouseClickPoint plain = MouseClickPoint.Parse("L;5;6");
+            Check("mouse point without modifiers stays plain",
+                !plain.HasModifiers && plain.ModifierText == "",
+                MouseClickPoint.Format(plain));
+            withMods.Ctrl = false;
+            withMods.Shift = false;
+            withMods.Alt = true;
+            withMods.Win = true;
+            string described = ActionCatalog.Describe("mouse.click", MouseClickPoint.Format(withMods));
+            Check("mouse point describes the held modifiers",
+                described.IndexOf("Alt + Win + 右键", StringComparison.Ordinal) >= 0,
+                described);
+        }
+
+        private static void TestMacros()
+        {
+            List<Macro> broken = new List<Macro>();
+            broken.Add(new Macro());
+            broken.Add(new Macro());
+            broken[0].Id = "same";
+            broken[1].Id = "same";
+            broken[0].Name = "  ";
+            broken[0].Steps.Add(new MacroStep());
+            broken[0].Steps[0].Action = null;
+            broken[0].Steps[0].Param = null;
+            broken[0].Steps[0].DelayMs = 99000;
+            broken[0].Steps[0].Count = 0;
+            broken.Add(null);
+
+            List<Macro> fixedList = ConfigStore.NormalizeMacroList(broken);
+            bool idsUnique = true;
+            HashSet<string> seen = new HashSet<string>();
+            foreach (Macro m in fixedList) if (!seen.Add(m.Id)) idsUnique = false;
+            Check("macro normalization repairs a broken file",
+                fixedList.Count == 2 && idsUnique
+                && fixedList[0].Name.Length > 0
+                && fixedList[0].Steps[0].Action == ActionCatalog.None
+                && fixedList[0].Steps[0].Param == ""
+                && fixedList[0].Steps[0].Note == ""
+                && fixedList[0].Steps[0].DelayMs <= 60000
+                && fixedList[0].Steps[0].Count >= 1,
+                "count=" + fixedList.Count + " unique=" + idsUnique);
+
+            MacroStep noted = new MacroStep();
+            noted.Action = "input.keys";
+            noted.Param = "Ctrl + C";
+            noted.Note = "复制段落";
+            MacroStep notedClone = noted.Clone();
+            Check("macro step keeps its name when cloned",
+                notedClone.Note == "复制段落" && notedClone.Param == "Ctrl + C",
+                notedClone.Note);
+
+            List<Macro> named = new List<Macro>();
+            Macro holder = new Macro();
+            holder.Steps.Add(new MacroStep { Action = "select.up", Param = "1", Note = "  选中  " });
+            holder.Steps.Add(new MacroStep { Action = "select.down", Param = "1", Note = new string('长', 70) });
+            named.Add(holder);
+            List<Macro> trimmed = ConfigStore.NormalizeMacroList(named);
+            Check("step names are trimmed and capped",
+                trimmed[0].Steps[0].Note == "选中" && trimmed[0].Steps[1].Note.Length == 60,
+                trimmed[0].Steps[1].Note.Length + " chars");
+
+            // The list's Key is what paints in the 动作 column and feeds the accessibility
+            // name, so a named step must show the name rather than the action text.
+            Check("a named step lists under its name",
+                new MacroStepListItem(notedClone, false).Key == "复制段落"
+                && new MacroStepListItem(new MacroStep { Action = "select.up", Param = "1" }, false).Key
+                    == ActionCatalog.Describe("select.up", "1"),
+                new MacroStepListItem(notedClone, false).Key);
+
+            Macro inner = new Macro();
+            inner.Name = "inner";
+            inner.Steps.Add(new MacroStep { Action = "select.up", Param = "1" });
+
+            Macro outer = new Macro();
+            outer.Name = "outer";
+            outer.RestoreCursor = true;
+            outer.Steps.Add(new MacroStep { Action = inner.ActionId, Param = "" });
+
+            Macro loop = new Macro();
+            loop.Name = "loop";
+            loop.Steps.Add(new MacroStep { Action = loop.ActionId, Param = "" });
+
+            List<Macro> set = new List<Macro>();
+            set.Add(inner);
+            set.Add(outer);
+            set.Add(loop);
+            string error = MacroLibrary.ValidateNesting(set, outer);
+            Check("macro nesting accepts a DAG", error == null, error);
+
+            error = MacroLibrary.ValidateNesting(set, loop);
+            Check("macro nesting rejects a cycle", !string.IsNullOrEmpty(error), error);
+
+            List<KeyMapping> bound = new List<KeyMapping>();
+            KeyMapping mapping = new KeyMapping();
+            mapping.Action = outer.ActionId;
+            bound.Add(mapping);
+            Check("macro binding is counted", MacroLibrary.BoundCount(bound, outer) == 1, "");
+            Check("restore-cursor flag survives cloning",
+                outer.Clone().RestoreCursor == outer.RestoreCursor && outer.RestoreCursor,
+                "");
+
+            MacroLibrary.RefreshCatalog(set);
+            Check("registered macro resolves as an action",
+                ActionCatalog.Get(outer.ActionId) != null
+                && ActionCatalog.Get(outer.ActionId).IsMacro
+                && ActionCatalog.Get(outer.ActionId).Name == "outer",
+                "");
+            Check("missing macro has a placeholder",
+                ActionCatalog.Get("macro.nope") != null
+                && ActionCatalog.Get("macro.nope").Missing,
+                "");
+
+            MacroLibrary.RefreshCatalog(new List<Macro>());
+
+            string file = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "clmacro-test-" + Guid.NewGuid().ToString("N") + ".clmacro");
+            try
+            {
+                MacroFileStore.Save(file, set);
+                List<Macro> loaded = MacroFileStore.Load(file);
+                Check("macro file round-trips",
+                    loaded != null && loaded.Count == 3
+                    && loaded[1].Name == "outer"
+                    && loaded[1].Steps.Count == 1
+                    && loaded[1].Steps[0].Action == inner.ActionId
+                    && loaded[0].Steps[0].DelayMs == 50
+                    && loaded[1].RestoreCursor,
+                    loaded == null ? "null" : "count=" + loaded.Count);
+            }
+            finally
+            {
+                try { System.IO.File.Delete(file); }
+                catch { }
+            }
+
+            // Dragging rows only reorders the list; the editor must write that order
+            // back into the macro before saving, and must never drop a step.
+            MacroStep first = new MacroStep(); first.Action = "select.up";
+            MacroStep second = new MacroStep(); second.Action = "move.down";
+            MacroStep third = new MacroStep(); third.Action = "move.left";
+            List<MacroStep> steps = new List<MacroStep>();
+            steps.Add(first); steps.Add(second); steps.Add(third);
+            List<MacroStep> shown = new List<MacroStep>();
+            shown.Add(third); shown.Add(first);
+            List<MacroStep> applied = MacroLibrary.ApplyStepOrder(steps, shown);
+            Check("dragging steps writes the shown order back",
+                applied.Count == 3 && applied[0] == third && applied[1] == first && applied[2] == second,
+                "count=" + applied.Count);
+            List<MacroStep> onlyOne = new List<MacroStep>();
+            onlyOne.Add(second);
+            List<MacroStep> kept = MacroLibrary.ApplyStepOrder(steps, onlyOne);
+            Check("step order never drops unseen rows",
+                kept.Count == 3 && kept[0] == second && kept.Contains(first) && kept.Contains(third),
+                "count=" + kept.Count);
+
+            // One macro at a time: a second trigger that arrives while a run is in
+            // flight must be refused (and must not stop the first one), then work
+            // again once the run has ended.
+            TestHost runHost = new TestHost();
+            using (ActionExecutor runExecutor = new ActionExecutor(runHost))
+            {
+                List<Macro> runnable = new List<Macro>();
+                Macro firstRun = new Macro();
+                firstRun.Name = "first";
+                firstRun.Steps.Add(new MacroStep { Action = ActionCatalog.None, Param = "", DelayMs = 60000 });
+                Macro secondRun = new Macro();
+                secondRun.Name = "second";
+                secondRun.Steps.Add(new MacroStep { Action = ActionCatalog.None, Param = "", DelayMs = 60000 });
+                runnable.Add(firstRun);
+                runnable.Add(secondRun);
+                MacroLibrary.RefreshCatalog(runnable);
+                using (MacroRunner runner = new MacroRunner(runExecutor, runHost, delegate { return runnable; }))
+                {
+                    string firstError;
+                    bool firstOk = runner.Start(firstRun.ActionId, out firstError);
+                    string busyError;
+                    bool secondOk = runner.Start(secondRun.ActionId, out busyError);
+                    bool keptRunning = runner.IsRunning && runner.RunningName == "first";
+                    runner.Stop();
+                    string laterError;
+                    bool laterOk = runner.Start(secondRun.ActionId, out laterError);
+                    Check("one macro runs at a time",
+                        firstOk && !secondOk && keptRunning
+                        && busyError != null && busyError.Contains("正在运行")
+                        && laterOk,
+                        "first=" + firstOk + " second=" + secondOk + " busy=" + busyError + " later=" + laterOk);
+                }
+                MacroLibrary.RefreshCatalog(new List<Macro>());
+            }
+        }
+
+        /// <summary>
+        /// Themed inputs: the wrapping used by MDialog and the numeric clamp used
+        /// by MNumberBox must work without a message loop.
+        /// </summary>
+        private static void TestInputs()
+        {
+            // A single-line label must never be handed a height below the rendered
+            // line: the bottom of g/p/q/y gets clipped and the text looks broken.
+            // Theme.LineHeight is the only safe source for that height.
+            bool captionFits = Theme.LineHeight(Theme.Caption)
+                >= TextRenderer.MeasureText("国Agq", Theme.Caption).Height;
+            bool bodyFits = Theme.LineHeight(Theme.Body)
+                >= TextRenderer.MeasureText("国Agq", Theme.Body).Height;
+            Label squeezed = Theme.MakeLabel("CapsLockLite.exe", Theme.Caption, Theme.TextTertiary,
+                0, 0, Theme.S(200), Theme.S(10));
+            bool labelFits = squeezed.Height >= TextRenderer.MeasureText("国Agq", Theme.Caption).Height;
+            squeezed.Dispose();
+            Check("single-line label heights cover descenders", captionFits && bodyFits && labelFits,
+                "caption=" + captionFits + " body=" + bodyFits + " label=" + labelFits);
+
+            string text = "CapsLock Lite 的自绘输入控件需要把长段落折行，"
+                + "并且折行后每一行都不能超过给定宽度，否则对话框正文会被裁掉。";
+            List<string> lines = MTextLayout.Wrap(text, Theme.Body, 220, true);
+            bool wrapped = lines.Count > 1;
+            bool fits = wrapped;
+            for (int i = 0; i < lines.Count && fits; i++)
+            {
+                if (lines[i].Length == 0) fits = false;
+                else if (TextRenderer.MeasureText(lines[i], Theme.Body,
+                    Size.Empty, TextFormatFlags.NoPadding).Width > 222) fits = false;
+            }
+            Check("dialog text wraps into several fitting lines", wrapped && fits,
+                "lines=" + lines.Count + " fits=" + fits);
+
+            using (MNumberBox box = new MNumberBox())
+            {
+                box.Minimum = 10;
+                box.Maximum = 20;
+                box.Value = 99;
+                bool high = box.Value == 20;
+                box.Value = 1;
+                bool low = box.Value == 10;
+                box.Value = 15;
+                Check("number box clamps to its range", high && low && box.Value == 15,
+                    "high=" + high + " low=" + low + " value=" + box.Value);
+            }
+
+            // A blank combo means "nothing chosen yet": the field must not fall
+            // back to Ctrl + C, and a new send-keys action must start blank.
+            using (MKeyComboField combo = new MKeyComboField())
+            {
+                bool blank = combo.ComboText == "";
+                combo.ComboText = "Ctrl + C";
+                bool parsed = combo.ComboText == "Ctrl + C";
+                combo.ComboText = "";
+                bool cleared = combo.ComboText == "";
+                combo.ComboText = "not a combo";
+                bool rejected = combo.ComboText == "";
+                Check("key combo field starts and resets blank", blank && parsed && cleared && rejected,
+                    "blank=" + blank + " parsed=" + parsed + " cleared=" + cleared + " rejected=" + rejected);
+                Check("send keys action defaults to an empty combo",
+                    ActionCatalog.Get("input.keys").DefaultParam == "",
+                    ActionCatalog.Get("input.keys").DefaultParam);
+            }
+
+            // Escape and the arrows are window navigation keys by default; the
+            // capture box has to swallow them so they can be bound like any key.
+            using (MKeyCapture capture = new MKeyCapture())
+            {
+                bool escape = capture.ProcessNavigationForTest(Keys.Escape)
+                    && capture.KeyCode == Keys.Escape
+                    && capture.IsInputKeyForTest(Keys.Escape);
+                Check("key capture takes Escape instead of closing the dialog", escape,
+                    capture.KeyCode.ToString());
+                bool arrows = true;
+                Keys[] arrowsToCheck = new Keys[] { Keys.Up, Keys.Down, Keys.Left, Keys.Right };
+                foreach (Keys key in arrowsToCheck)
+                {
+                    capture.KeyCode = Keys.None;
+                    arrows = arrows && capture.IsInputKeyForTest(key)
+                        && capture.ProcessNavigationForTest(key)
+                        && capture.KeyCode == key;
+                }
+                Check("key capture takes the arrow keys instead of moving focus", arrows,
+                    capture.KeyCode.ToString());
+            }
+        }
+
+        private static void TestMatching()
+        {
+            AppSettings settings = ConfigStore.CreateDefault();
+            settings.TapAction = "none";
+            HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero);
+            MethodInfo handler = typeof(HotkeyManager).GetMethod("OnHookKey",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            List<string> fired = new List<string>();
+            manager.ActionTriggered += delegate(KeyMapping m) { fired.Add(m.Action); };
+            List<KeyMapping> held = new List<KeyMapping>();
+            manager.HoldStarted += delegate(KeyMapping m) { held.Add(m); };
+
+            bool capsDown = (bool)handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            bool keyDown = (bool)handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+            bool capsUp = (bool)handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+            Check("caps layer swallows caps", capsDown && capsUp, "");
+            // Defaults mark the arrow sends as hold, so the Caps+E binding starts a
+            // physical hold instead of one ActionTriggered call.
+            Check("caps layer triggers E",
+                keyDown && ((fired.Count == 1 && fired[0] == "input.keys")
+                    || (held.Count == 1 && held[0].Action == "input.keys")),
+                string.Join(",", fired.ToArray()) + "/" + held.Count);
+
+            fired.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.LMenu, true) });
+            bool altE = (bool)handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.LMenu, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+            Check("caps+alt does not fire the plain E binding", fired.Count == 0, altE + ":" + string.Join(",", fired.ToArray()));
+
+            fired.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            bool unmapped = (bool)handler.Invoke(manager, new object[] { Key(Keys.Q, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.Q, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+            Check("unmapped key stays silent in the Caps layer", unmapped && fired.Count == 0, "");
+
+            // A modifier held before CapsLock already reached the target window.
+            // While the Caps layer owns the keyboard it must stop acting there,
+            // otherwise a Caps+Alt+Q binding that sends F4 arrives as Alt+F4.
+            List<string> sent = new List<string>();
+            manager.SendKeyState = delegate(Keys k, bool up) { sent.Add(k + (up ? " up" : " down")); };
+
+            fired.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.LMenu, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            Check("modifier held before caps is released to the target",
+                sent.Count == 1 && sent[0] == "LMenu up", string.Join(",", sent.ToArray()));
+
+            bool altUp = (bool)handler.Invoke(manager, new object[] { Key(Keys.LMenu, false) });
+            Check("the physical up of a released modifier stays silent",
+                altUp && sent.Count == 1, altUp + ":" + string.Join(",", sent.ToArray()));
+
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+            Check("a modifier already released is not restored",
+                sent.Count == 1, string.Join(",", sent.ToArray()));
+
+            sent.Clear();
+            fired.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.LMenu, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.LMenu, false) });
+            Check("a modifier still held is restored after caps",
+                sent.Count == 2 && sent[0] == "LMenu up" && sent[1] == "LMenu down",
+                string.Join(",", sent.ToArray()));
+
+            // Multi-key rollover: every key stays physically down (a real keyboard
+            // never releases a key because another one was pressed), and only the
+            // auto-repeat moves to the newest key. Games rely on this to keep
+            // "forward" held while the player taps "left" and "right".
+            List<string> events = new List<string>();
+            manager.HoldStarted += delegate(KeyMapping m) { events.Add("start:" + (Keys)m.Key); };
+            manager.HoldEnded += delegate(KeyMapping m) { events.Add("end:" + (Keys)m.Key); };
+            manager.ActionTriggered += delegate(KeyMapping m) { events.Add("action:" + (Keys)m.Key); };
+
+            events.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.D, true) });
+            Check("the previous key keeps its hold when the newest takes over",
+                string.Join(",", events.ToArray()) == "start:E,start:D",
+                string.Join(",", events.ToArray()));
+
+            events.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.D, false) });
+            Check("releasing the newest key only releases it",
+                string.Join(",", events.ToArray()) == "end:D",
+                string.Join(",", events.ToArray()));
+
+            events.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+            Check("releasing an older key releases it too",
+                string.Join(",", events.ToArray()) == "end:E",
+                string.Join(",", events.ToArray()));
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+
+            // Letting Caps go with a chord still held must release everything,
+            // otherwise the key stays stuck in the target application.
+            events.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+            Check("releasing caps releases the held chord key",
+                string.Join(",", events.ToArray()) == "start:E,end:E",
+                string.Join(",", events.ToArray()));
+            handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+
+            // A one-shot key takes the repeat but leaves the held key down: the
+            // game still sees the movement key pressed.
+            KeyMapping oneShot = new KeyMapping();
+            oneShot.Caps = true;
+            oneShot.Key = (int)Keys.B;
+            oneShot.Action = ActionCatalog.None;
+            oneShot.TriggerMode = "once";
+            settings.Mappings.Add(oneShot);
+
+            events.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.B, true) });
+            Check("a one-shot key keeps the previous hold down",
+                string.Join(",", events.ToArray()) == "start:E,action:B",
+                string.Join(",", events.ToArray()));
+            handler.Invoke(manager, new object[] { Key(Keys.B, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+
+            events.Clear();
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+            handler.Invoke(manager, new object[] { Key(Keys.Q, true) });
+            Check("an unmapped key keeps the held chord down",
+                string.Join(",", events.ToArray()) == "start:E",
+                string.Join(",", events.ToArray()));
+            handler.Invoke(manager, new object[] { Key(Keys.Q, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+            handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+
+            manager.Dispose();
+        }
+
+        private static KeyboardEventArgs Key(Keys key, bool down)
+        {
+            return new KeyboardEventArgs(key, down, !down, false, 0);
+        }
+
+        private static void TestConflicts()
+        {
+            KeyMapping first = new KeyMapping();
+            first.Id = "conflict-a";
+            first.Caps = true;
+            first.KeyCode = Keys.E;
+
+            KeyMapping duplicate = new KeyMapping();
+            duplicate.Id = "conflict-b";
+            duplicate.Caps = true;
+            duplicate.KeyCode = Keys.E;
+
+            KeyMapping global = new KeyMapping();
+            global.Id = "conflict-c";
+            global.Caps = false;
+            global.KeyCode = Keys.E;
+
+            KeyMapping disabled = new KeyMapping();
+            disabled.Id = "conflict-d";
+            disabled.Caps = true;
+            disabled.KeyCode = Keys.E;
+            disabled.Enabled = false;
+
+            HashSet<string> shadowed = MappingConflicts.FindShadowed(
+                new KeyMapping[] { first, duplicate, global, disabled });
+
+            Check("duplicate trigger is flagged",
+                shadowed.Count == 1 && shadowed.Contains("conflict-b"),
+                string.Join(",", new List<string>(shadowed).ToArray()));
+            Check("same key in another scope is not a duplicate",
+                !shadowed.Contains("conflict-c"), "");
+            Check("disabled duplicate is ignored", !shadowed.Contains("conflict-d"), "");
+        }
+
+        private static void TestPresets()
+        {
+            Check("app settings start at config version 6",
+                new AppSettings().ConfigVersion == 6, "");
+
+            ShortcutPreset code = new ShortcutPreset();
+            code.Id = "preset-code";
+            code.Name = "  Visual Studio Code  ";
+            code.Process = "C:\\Program Files\\Microsoft VS Code\\Code.exe";
+            KeyMapping copy = new KeyMapping();
+            copy.Id = "preset-copy";
+            copy.Action = "input.keys";
+            copy.Param = "Ctrl + C";
+            code.Mappings.Add(copy);
+
+            ShortcutPreset duplicate = new ShortcutPreset();
+            duplicate.Id = "preset-code";
+            duplicate.Name = new string('长', 70);
+            duplicate.Process = "code.EXE";
+
+            ShortcutPreset unbound = new ShortcutPreset();
+            unbound.Id = "preset-unbound";
+
+            List<ShortcutPreset> normalized = ConfigStore.NormalizePresetList(
+                new List<ShortcutPreset> { code, duplicate, unbound, null });
+
+            Check("preset ids are made unique",
+                normalized.Count == 3 && normalized[0].Id != normalized[1].Id,
+                "count=" + normalized.Count);
+            Check("preset name is trimmed and capped",
+                normalized[0].Name == "Visual Studio Code" && normalized[1].Name.Length == 60,
+                normalized[0].Name);
+            Check("one program keeps one preset",
+                normalized[0].Process == "Code" && normalized[1].Process == "",
+                normalized[0].Process + " / " + normalized[1].Process);
+            Check("unnamed unbound preset gets a fallback name",
+                normalized[2].Name == "未命名预设", normalized[2].Name);
+            Check("preset shortcuts survive normalization",
+                normalized[0].Mappings.Count == 1 && normalized[0].Mappings[0].Param == "Ctrl + C", "");
+
+            ShortcutPreset clone = normalized[0].Clone();
+            clone.Mappings[0].Param = "Ctrl + V";
+            Check("preset clone owns its mappings",
+                normalized[0].Mappings[0].Param == "Ctrl + C", "");
+
+            AppSettings settings = new AppSettings();
+            KeyMapping global = new KeyMapping();
+            global.Id = "global-one";
+            global.Action = "input.keys";
+            settings.Mappings.Add(global);
+            settings.Presets.Add(normalized[0]);
+
+            Check("preset matches the process name case-insensitively",
+                ShortcutSets.ForProcess(settings, "code.exe") == normalized[0].Mappings, "");
+            Check("unknown process falls back to the global list",
+                ShortcutSets.ForProcess(settings, "notepad") == settings.Mappings, "");
+            Check("no foreground process uses the global list",
+                ShortcutSets.ForProcess(settings, "") == settings.Mappings, "");
+            Check("every preset list is counted",
+                ShortcutSets.All(settings).Count == 2, "");
+            Check("preset lookup by process finds the owner",
+                ShortcutSets.FindByProcess(settings, "CODE") == normalized[0], "");
+        }
+
+        private static void TestPluginTrust()
+        {
+            string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest-trust");
+            string marker = Path.Combine(root, "probe-ran.txt");
+            string execMarker = Path.Combine(root, "probe-exec.txt");
+            string source = Path.Combine(root, "trust-probe.cs");
+            try
+            {
+                Directory.CreateDirectory(root);
+                string template = @"
+using System;
+using System.IO;
+using CapsLockLite;
+
+public sealed class TrustProbePlugin : IPlugin
+{
+    static TrustProbePlugin()
+    {
+        File.WriteAllText(@""__MARKER__"", ""ran"");
+    }
+
+    public string Id { get { return ""selftest.trust""; } }
+    public string Name { get { return ""Trust Probe""; } }
+    public string Version { get { return ""1.0""; } }
+    public string Author { get { return ""selftest""; } }
+    public string Description { get { return ""trust test""; } }
+    public IPluginAction[] CreateActions()
+    {
+        return new IPluginAction[] { new NoopAction() };
+    }
+}
+
+public sealed class NoopAction : IPluginAction
+{
+    public string Id { get { return ""noop""; } }
+    public string Category { get { return ""test""; } }
+    public string Name { get { return ""noop""; } }
+    public string Description { get { return string.Empty; } }
+    public ActionParamKind ParamKind { get { return ActionParamKind.None; } }
+    public string DefaultParam { get { return string.Empty; } }
+    public bool Repeatable { get { return false; } }
+    public void Execute(PluginContext context)
+    {
+        File.WriteAllText(@""__EXEC_MARKER__"", ""executed"");
+    }
+}
+";
+                string code = template.Replace("__MARKER__", marker).Replace("__EXEC_MARKER__", execMarker);
+                File.WriteAllText(source, code, new UTF8Encoding(false));
+
+                // A file dropped into the plugin folder must not be compiled or
+                // executed until its hash appears in the trust store.
+                string dropped = Path.Combine(PluginRuntime.PluginDirectory, "dropped.cs");
+                File.WriteAllText(dropped, code, new UTF8Encoding(false));
+                try { if (File.Exists(marker)) File.Delete(marker); }
+                catch { }
+                PluginRuntime.Reload();
+                Check("dropped plugin is not executed", !File.Exists(marker), "");
+                try { if (File.Exists(dropped)) File.Delete(dropped); }
+                catch { }
+                PluginRuntime.Reload();
+
+                IList<PluginImportResult> staged = PluginRuntime.ImportPaths(new string[] { source });
+                Check("import stages without executing",
+                    staged.Count == 1 && staged[0].Imported && !File.Exists(marker),
+                    DescribeImports(staged));
+
+                PluginRuntime.TrustImports(staged);
+                Check("trusted plugin executes on load", File.Exists(marker), "");
+
+                PluginStatus loaded = null;
+                for (int i = 0; i < PluginRuntime.Plugins.Count; i++)
+                {
+                    if (string.Equals(PluginRuntime.Plugins[i].Id, "selftest.trust",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        loaded = PluginRuntime.Plugins[i];
+                        break;
+                    }
+                }
+                Check("trusted plugin is loaded", loaded != null && loaded.IsLoaded, "");
+
+                KeyMapping mapping = new KeyMapping();
+                mapping.Action = "plugin.selftest.trust.noop";
+                mapping.Param = "";
+                try { if (File.Exists(execMarker)) File.Delete(execMarker); }
+                catch { }
+                bool posted = PluginRuntime.Dispatch(mapping, new TestHost());
+                for (int i = 0; i < 40 && !File.Exists(execMarker); i++)
+                    Thread.Sleep(50);
+                Check("plugin action runs on the dedicated plugin thread",
+                    posted && File.Exists(execMarker), "posted=" + posted);
+
+                if (loaded != null && File.Exists(loaded.FilePath))
+                {
+                    File.AppendAllText(loaded.FilePath, "\r\n// tampered", new UTF8Encoding(false));
+                    try { File.Delete(marker); } catch { }
+                    PluginRuntime.Reload();
+                    bool stillLoaded = false;
+                    for (int i = 0; i < PluginRuntime.Plugins.Count; i++)
+                    {
+                        if (string.Equals(PluginRuntime.Plugins[i].FilePath, loaded.FilePath,
+                            StringComparison.OrdinalIgnoreCase)
+                            && PluginRuntime.Plugins[i].IsLoaded)
+                        {
+                            stillLoaded = true;
+                            break;
+                        }
+                    }
+                    Check("modified plugin is rejected", !stillLoaded, "");
+
+                    bool untrusted = PluginRuntime.UntrustFile(loaded.FilePath);
+                    bool stillTrusted = false;
+                    for (int i = 0; i < PluginRuntime.Plugins.Count; i++)
+                    {
+                        if (string.Equals(PluginRuntime.Plugins[i].FilePath, loaded.FilePath,
+                            StringComparison.OrdinalIgnoreCase) && PluginRuntime.Plugins[i].Trusted)
+                        {
+                            stillTrusted = true;
+                            break;
+                        }
+                    }
+                    Check("untrusting a plugin drops its trust record", untrusted && !stillTrusted,
+                        "untrusted=" + untrusted + " stillTrusted=" + stillTrusted);
+
+                    try { if (File.Exists(loaded.FilePath)) File.Delete(loaded.FilePath); }
+                    catch { }
+                }
+            }
+            finally
+            {
+                try { if (File.Exists(marker)) File.Delete(marker); }
+                catch { }
+                try { if (File.Exists(execMarker)) File.Delete(execMarker); }
+                catch { }
+                try { if (File.Exists(source)) File.Delete(source); }
+                catch { }
+                try { Directory.Delete(root, true); }
+                catch { }
+            }
+        }
+
+        private static void TestPluginPackages()
+        {
+            string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest-import");
+            string zip = Path.Combine(root, "bundle.zip");
+            List<string> importedFiles = new List<string>();
+
+            try
+            {
+                Directory.CreateDirectory(root);
+                string source = Path.Combine(root, "zip-plugin.cs");
+                File.WriteAllText(source, PluginSource, new UTF8Encoding(false));
+
+                using (ZipArchive archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+                {
+                    archive.CreateEntryFromFile(source, "bundle/zip-plugin.cs");
+                    archive.CreateEntry("bundle/readme.txt");
+                }
+
+                IList<PluginImportResult> results = PluginRuntime.ImportPaths(new string[] { zip });
+                for (int i = 0; i < results.Count; i++)
+                {
+                    if (results[i].Imported) importedFiles.Add(results[i].FilePath);
+                }
+
+                Check("zip bundle is recognised",
+                    results.Count == 1 && results[0].Imported, DescribeImports(results));
+
+                // Import is compile-only; trust is the explicit second step that
+                // allows the plugin to be instantiated.
+                PluginRuntime.TrustImports(results);
+                Check("zip plugin action is registered",
+                    ActionCatalog.Contains("plugin.selftest.sample.noop"), "");
+
+                string expectedFolder = Path.Combine(PluginRuntime.PluginDirectory, "selftest.sample");
+                PluginStatus loaded = null;
+                for (int i = 0; i < PluginRuntime.Plugins.Count; i++)
+                {
+                    if (string.Equals(PluginRuntime.Plugins[i].Id, "selftest.sample",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        loaded = PluginRuntime.Plugins[i];
+                        break;
+                    }
+                }
+                Check("import lands in a per-plugin folder",
+                    loaded != null
+                        && loaded.FilePath.StartsWith(expectedFolder, StringComparison.OrdinalIgnoreCase),
+                    loaded == null ? "no plugin status" : loaded.FilePath);
+                Check("plugin data folder holds the settings file",
+                    string.Equals(Path.GetDirectoryName(new PluginSettingsStore("selftest.sample").FilePath),
+                        expectedFolder, StringComparison.OrdinalIgnoreCase),
+                    new PluginSettingsStore("selftest.sample").FilePath);
+
+                string bogus = Path.Combine(root, "bogus.cs");
+                File.WriteAllText(bogus, "public class NotAPlugin { }", new UTF8Encoding(false));
+                IList<PluginImportResult> rejected = PluginRuntime.ImportPaths(new string[] { bogus });
+                Check("non plugin source is rejected",
+                    rejected.Count == 1 && !rejected[0].Imported && !string.IsNullOrEmpty(rejected[0].Error),
+                    DescribeImports(rejected));
+            }
+            finally
+            {
+                for (int i = 0; i < importedFiles.Count; i++)
+                {
+                    try { if (File.Exists(importedFiles[i])) File.Delete(importedFiles[i]); }
+                    catch { }
+                }
+                for (int i = 0; i < PluginRuntime.Plugins.Count; i++)
+                {
+                    try
+                    {
+                        string file = PluginRuntime.Plugins[i].FilePath;
+                        if (!string.IsNullOrEmpty(file) && File.Exists(file)) File.Delete(file);
+                    }
+                    catch { }
+                }
+                PluginRuntime.Reload();
+                try { Directory.Delete(root, true); }
+                catch { }
+            }
+        }
+
+        private static string DescribeImports(IList<PluginImportResult> results)
+        {
+            if (results == null || results.Count == 0) return "no results";
+            StringBuilder text = new StringBuilder();
+            for (int i = 0; i < results.Count; i++)
+            {
+                if (i > 0) text.Append("; ");
+                text.Append(results[i].DisplayName).Append('=')
+                    .Append(results[i].Imported ? "ok" : "fail:" + results[i].Error);
+            }
+            return text.ToString();
+        }
+
+        private static void TestPluginSettings()
+        {
+            string id = "selftest.settings";
+            PluginSettingsStore store = new PluginSettingsStore(id);
+            try
+            {
+                store.Set("alpha", "1");
+                store.Set("beta", "中文");
+                Check("plugin settings are dirty before save", store.HasChanges, "");
+
+                string error;
+                bool saved = store.Save(out error);
+                Check("plugin settings save", saved, error);
+
+                PluginSettingsStore reloaded = new PluginSettingsStore(id);
+                Check("plugin settings round trip",
+                    reloaded.Get("alpha", "") == "1" && reloaded.Get("beta", "") == "中文",
+                    reloaded.Get("alpha", "") + "/" + reloaded.Get("beta", ""));
+                Check("plugin settings fallback", reloaded.Get("missing", "x") == "x", "");
+
+                PluginStatus status = new PluginStatus();
+                Check("plugin without settings page is detected", !status.HasSettings, "");
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(store.FilePath)) File.Delete(store.FilePath);
+                    string directory = Path.GetDirectoryName(store.FilePath);
+                    if (!string.IsNullOrEmpty(directory) && Directory.Exists(directory)
+                        && Directory.GetFileSystemEntries(directory).Length == 0)
+                        Directory.Delete(directory);
+                }
+                catch { }
+            }
+        }
+
+        private static void TestHook()
+        {
+            using (KeyboardHook hook = new KeyboardHook())
+            {
+                bool installed = hook.Install();
+                if (installed) hook.Uninstall();
+                Check("keyboard hook install", installed, "Win32=" + hook.LastError);
+            }
+        }
+
+        private const string PluginSource = @"
+using CapsLockLite;
+
+public sealed class SelfTestPlugin : IPlugin
+{
+    public string Id { get { return ""selftest.sample""; } }
+    public string Name { get { return ""SelfTest""; } }
+    public string Version { get { return ""1.0.0""; } }
+    public string Author { get { return ""selftest""; } }
+    public string Description { get { return string.Empty; } }
+
+    public IPluginAction[] CreateActions()
+    {
+        return new IPluginAction[] { new NoopAction() };
+    }
+}
+
+public sealed class NoopAction : IPluginAction
+{
+    public string Id { get { return ""noop""; } }
+    public string Category { get { return ""测试""; } }
+    public string Name { get { return ""空动作""; } }
+    public string Description { get { return string.Empty; } }
+    public ActionParamKind ParamKind { get { return ActionParamKind.None; } }
+    public string DefaultParam { get { return string.Empty; } }
+    public bool Repeatable { get { return false; } }
+
+    public void Execute(PluginContext context)
+    {
+    }
+}
+";
+
+        private static void TestPlugins()
+        {
+            Check("plugin id accepts dotted id",
+                PluginRuntime.IsValidPluginId("com.example.screenshot"), "");
+            Check("plugin id rejects single segment",
+                !PluginRuntime.IsValidPluginId("screenshot"), "");
+            Check("plugin action id rejects slash",
+                !PluginRuntime.IsValidPluginActionId("a/b"), "");
+
+            AppSettings settings = new AppSettings();
+            KeyMapping mapping = new KeyMapping();
+            mapping.Id = "plugin-mapping";
+            mapping.Caps = true;
+            mapping.KeyCode = Keys.K;
+            mapping.Action = "plugin.not.installed.missing";
+            mapping.Param = "keep-me";
+            mapping.TriggerMode = "hold";
+            settings.Mappings.Add(mapping);
+            ConfigStore.Normalize(settings);
+            Check("missing plugin action keeps id and param",
+                settings.Mappings.Count == 1
+                    && settings.Mappings[0].Action == "plugin.not.installed.missing"
+                    && settings.Mappings[0].Param == "keep-me"
+                    && settings.Mappings[0].TriggerMode == "hold",
+                settings.Mappings.Count == 1 ? settings.Mappings[0].Action : "count=" + settings.Mappings.Count);
+
+            string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest-plugin");
+            string file = Path.Combine(folder, "selftest-plugin.cs");
+            try
+            {
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(file, PluginSource, new UTF8Encoding(false));
+
+                PluginStatus status = PluginRuntime.LoadForTest(file);
+                Check("plugin compiles and loads", status.IsLoaded, status.Error);
+                Check("plugin action is registered",
+                    status.IsLoaded && ActionCatalog.Contains("plugin.selftest.sample.noop"), "");
+                Check("plugin action exposes metadata",
+                    status.IsLoaded
+                        && ActionCatalog.Get("plugin.selftest.sample.noop").Category == "测试"
+                        && !ActionCatalog.IsRepeatable("plugin.selftest.sample.noop"), "");
+            }
+            finally
+            {
+                ActionCatalog.UnregisterPluginActions();
+                try { Directory.Delete(folder, true); }
+                catch { }
+            }
+
+            Check("plugin actions are removed on unload",
+                !ActionCatalog.Contains("plugin.selftest.sample.noop"), "");
+        }
+
+        private sealed class TestHost : IAppHost
+        {
+            public void OpenCalculator() { }
+            public void ReloadFromDisk() { }
+            public void ShowMainWindow() { }
+            public void ShowStatus(string message, MInfoSeverity severity) { }
+            public void ShowStatus(string message, bool error) { }
+            public void ShowEscapeResult(string escaped, string original) { }
+            public void OpenHelp() { }
+        }
+    }
+}

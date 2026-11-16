@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          (Get-Command csc.exe -ErrorAction SilentlyContinue).Source
+          Test-Path (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe')
+
+      - name: Build
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Self-test
+        shell: powershell
+        run: |
+          $process = Start-Process -FilePath .\dist\CapsLockLite.exe -ArgumentList '--selftest' -Wait -PassThru
+          Get-Content .\dist\selftest.log
+          if ($process.ExitCode -ne 0) { exit 1 }
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapsLockLite-${{ github.sha }}
+          path: |
+            dist/CapsLockLite.exe
+            dist/selftest.log
+          if-no-files-found: error

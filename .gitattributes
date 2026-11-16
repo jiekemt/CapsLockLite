@@ -1,0 +1,14 @@
+* text=auto
+
+*.cs      text diff=csharp
+*.md      text
+*.ps1     text eol=crlf
+*.manifest text
+*.json    text
+*.yml     text
+*.gitattributes text
+
+*.png     binary
+*.ico     binary
+*.exe     binary
+*.zip     binary

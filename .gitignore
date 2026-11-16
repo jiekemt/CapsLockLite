@@ -1,0 +1,20 @@
+# Build output
+dist/
+bin/
+obj/
+selftest-data-*/
+
+# Runtime data
+CapsLockLite-data/
+*.log
+*.tmp
+
+# Editor / IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Packaging scratch
+preview/
