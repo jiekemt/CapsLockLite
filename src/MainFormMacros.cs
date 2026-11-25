@@ -58,6 +58,9 @@ namespace CapsLockLite
 
             _macroListCard = new MCard();
             _macroListCard.Padding = new Padding(1);
+            // Square corners: the list is full-bleed, so a rounded card would show a
+            // mismatched corner ring at all four corners (same as the shortcut list).
+            _macroListCard.Radius = 0;
             page.Controls.Add(_macroListCard);
 
             _macroList = new MListView();

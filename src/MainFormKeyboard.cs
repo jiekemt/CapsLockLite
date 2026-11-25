@@ -18,6 +18,7 @@ namespace CapsLockLite
         private const string KeysHintShort = "双击编辑 · 右键更多";
 
         private const int KeyboardAnimationMs = 220;
+        private const int MouseAnimationMs = 220;
 
         private Panel _keyboardHost;
         private MKeyboardView _keyboard;
@@ -29,6 +30,14 @@ namespace CapsLockLite
         private float _keyboardTarget = 1f;
         private DateTime _keyboardStarted;
         private bool _keyboardExpanded = true;
+
+        private MMousePad _mousePad;
+        private bool _mousePadCollapsed;
+        private Timer _mouseTimer;
+        private float _mouseProgress;      // 0 = open card, 1 = rail
+        private float _mouseFrom;
+        private float _mouseTarget;
+        private DateTime _mouseStarted;
 
         private bool _filterCaps;
         private bool _filterCtrl;
@@ -57,7 +66,76 @@ namespace CapsLockLite
             _keyboard.KeyActivated += delegate { ActivateSelectedKey(); };
             _keyboard.KeyContextRequested += delegate { ShowKeyboardMenu(); };
             _keyboard.KeyDragDropped += delegate(Keys from, Keys to) { MoveKeyBindings(from, to); };
+            // A cap dragged past the board edge can land on a mouse zone.
+            _keyboard.ExternalDropTarget = delegate(Point screen)
+            {
+                return _mousePad != null && _mousePad.Visible
+                    ? _mousePad.ZoneAtScreen(screen) : Keys.None;
+            };
+            _keyboard.KeyDragDroppedExternal += delegate(Keys from, Keys to) { MoveKeyBindings(from, to); };
+            _keyboard.ExternalTargetChanged += delegate(Keys key)
+            {
+                if (_mousePad != null) _mousePad.SetDropTarget(key);
+            };
+            _keyboard.DragPointerMoved += delegate(DragGhostCard card, Point screen, bool outside)
+            {
+                if (_mousePad != null && _mousePad.Visible)
+                    _mousePad.SetExternalDrag(card, screen, outside);
+            };
+            _keyboard.DragFinished += delegate
+            {
+                if (_mousePad != null) _mousePad.SetExternalDrag(null, Point.Empty, false);
+            };
             _keyboardHost.Controls.Add(_keyboard);
+
+            _mousePad = new MMousePad();
+            // ... and a zone dragged past the card edge can land on a keycap.
+            _mousePad.ExternalDropTarget = delegate(Point screen)
+            {
+                return _keyboard == null ? Keys.None : _keyboard.KeyAtScreen(screen);
+            };
+            _mousePad.ZoneDropped += delegate(Keys from, Keys to) { MoveKeyBindings(from, to); };
+            _mousePad.ExternalTargetChanged += delegate(Keys key)
+            {
+                if (_keyboard != null) _keyboard.SetExternalDropKey(key);
+            };
+            _mousePad.DragPointerMoved += delegate(DragGhostCard card, Point screen, bool outside)
+            {
+                if (_keyboard != null) _keyboard.SetExternalDrag(card, screen, outside);
+            };
+            _mousePad.DragFinished += delegate
+            {
+                if (_keyboard != null) _keyboard.SetExternalDrag(null, Point.Empty, false);
+            };
+            _mousePad.ZoneClicked += delegate(Keys key) { SelectMouseZone(key, true); };
+            _mousePad.ZoneContextRequested += delegate(Keys key)
+            {
+                SelectMouseZone(key, false);
+                ShowKeyboardMenu();
+            };
+            _mousePad.ZoneActivated += delegate(Keys key)
+            {
+                SelectMouseZone(key, false);
+                ActivateSelectedKey();
+            };
+            _mousePad.CollapseRequested += delegate(bool collapse)
+            {
+                StartMouseAnimation(collapse ? 1f : 0f);
+            };
+            page.Controls.Add(_mousePad);
+        }
+
+        /// <summary>
+        /// Selects a mouse zone. A plain click toggles like a keycap; the context
+        /// menu and the double-click path force the selection because they act on
+        /// the zone the user just pointed at.
+        /// </summary>
+        private void SelectMouseZone(Keys key, bool toggle)
+        {
+            if (key == Keys.None) return;
+            if (_keyboard != null) _keyboard.SetSelectedKey(Keys.None);
+            _selectedKey = toggle && _selectedKey == key ? Keys.None : key;
+            RefreshList();
         }
 
         /// <summary>Height the board wants at this page width, capped so the list keeps room.</summary>
@@ -91,6 +169,67 @@ namespace CapsLockLite
         }
 
         // ---- collapse / expand ------------------------------------------------
+        /// <summary>
+        /// Slide the mouse card between the open width and the 30px rail. Same clock
+        /// as the keyboard: 15 ms ticks, 220 ms, ease-out cubic, and the value is
+        /// driven from here so an interrupted toggle can reverse from where it is.
+        /// </summary>
+        private void StartMouseAnimation(float target)
+        {
+            _mouseFrom = _mouseProgress;
+            _mouseTarget = target;
+            _mouseStarted = DateTime.UtcNow;
+            if (_mouseTimer == null)
+            {
+                _mouseTimer = new Timer();
+                _mouseTimer.Interval = 15;
+                _mouseTimer.Tick += delegate { TickMouseAnimation(); };
+            }
+            _mouseTimer.Start();
+            TickMouseAnimation();
+        }
+
+        private void TickMouseAnimation()
+        {
+            if (IsDisposed) return;
+
+            float t = (float)((DateTime.UtcNow - _mouseStarted).TotalMilliseconds
+                / (double)MouseAnimationMs);
+            if (t < 0f) t = 0f;
+            if (t > 1f) t = 1f;
+            float eased = 1f - (float)Math.Pow(1.0 - t, 3.0);   // ease-out cubic
+            _mouseProgress = _mouseFrom + (_mouseTarget - _mouseFrom) * eased;
+
+            if (t >= 1f)
+            {
+                _mouseProgress = _mouseTarget;
+                if (_mouseTimer != null) _mouseTimer.Stop();
+            }
+
+            bool collapsed = _mouseProgress >= 0.999f;
+            if (collapsed != _mousePadCollapsed)
+            {
+                _mousePadCollapsed = collapsed;
+                // A hidden card must not keep a filter that has no visible source.
+                if (collapsed && MouseKeys.IsMouseKey(_selectedKey))
+                {
+                    _selectedKey = Keys.None;
+                    RefreshList();
+                }
+            }
+            if (_mousePad != null) _mousePad.CollapseProgress = _mouseProgress;
+            LayoutContent();
+        }
+
+        private void DisposeMouseAnimation()
+        {
+            if (_mouseTimer == null) return;
+            _mouseTimer.Stop();
+            _mouseTimer.Dispose();
+            _mouseTimer = null;
+        }
+
+        // ---- keyboard collapse / expand ---------------------------------------
         private void ToggleKeyboard()
         {
             _keyboardExpanded = !_keyboardExpanded;
@@ -200,10 +339,18 @@ namespace CapsLockLite
         /// <summary>Pushes the current data/filter into the board; never refreshes the list.</summary>
         private void RefreshKeyboard()
         {
-            if (_keyboard == null) return;
-            _keyboard.SetMappings(MappingList);
-            _keyboard.SetFilter(_filterCaps, _filterCtrl, _filterAlt, _filterShift, _filterWin);
-            _keyboard.SetSelectedKey(_selectedKey);
+            if (_keyboard != null)
+            {
+                _keyboard.SetMappings(MappingList);
+                _keyboard.SetFilter(_filterCaps, _filterCtrl, _filterAlt, _filterShift, _filterWin);
+                _keyboard.SetSelectedKey(_selectedKey);
+            }
+            if (_mousePad != null)
+            {
+                _mousePad.SetMappings(MappingList);
+                _mousePad.SetFilter(_filterCaps, _filterCtrl, _filterAlt, _filterShift, _filterWin);
+                _mousePad.SelectedKey = _selectedKey;
+            }
         }
 
         private void UpdateKeyboardSummary(int visibleCount)

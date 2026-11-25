@@ -146,18 +146,28 @@ namespace CapsLockLite
             _tapCombo = new MComboBox();
             _tapCombo.Items.Add("切换大小写");
             _tapCombo.Items.Add("发送 Esc");
+            _tapCombo.Items.Add("切换输入法（Win + Space）");
             _tapCombo.Items.Add("不操作");
-            _tapCombo.Width = Theme.S(150);
+            // Wide enough for the longest option at the current DPI: the field
+            // ellipsises, but a clipped "切换输入法（Win +…" reads as a bug.
+            int tapWidth = Theme.S(150);
+            for (int i = 0; i < _tapCombo.Items.Count; i++)
+            {
+                int needed = Theme.Measure(_tapCombo.Items[i], Theme.Body).Width + Theme.S(44);
+                if (needed > tapWidth) tapWidth = needed;
+            }
+            _tapCombo.Width = tapWidth;
             _tapCombo.SelectedIndexChanged += delegate
             {
                 if (_syncing) return;
                 if (_tapCombo.SelectedIndex == 1) _settings.TapAction = "esc";
-                else if (_tapCombo.SelectedIndex == 2) _settings.TapAction = "none";
+                else if (_tapCombo.SelectedIndex == 2) _settings.TapAction = "ime";
+                else if (_tapCombo.SelectedIndex == 3) _settings.TapAction = "none";
                 else _settings.TapAction = "caps";
                 SaveQuiet();
                 ShowStatus("短按 Caps Lock 的行为已更新", MInfoSeverity.Info);
             };
-            y = AddRow(card, "短按 Caps Lock", "轻按且没有按组合键时执行的动作。", _tapCombo, y);
+            y = AddRow(card, "短按 Caps Lock", "轻按且没有按组合键时执行的动作。切换输入法发送系统默认的 Win + Space。", _tapCombo, y);
 
             Panel numericHost = new Panel();
             numericHost.BackColor = Color.Transparent;
@@ -349,7 +359,8 @@ namespace CapsLockLite
                 if (_tapCombo != null)
                 {
                     if (_settings.TapAction == "esc") _tapCombo.SelectedIndex = 1;
-                    else if (_settings.TapAction == "none") _tapCombo.SelectedIndex = 2;
+                    else if (_settings.TapAction == "ime") _tapCombo.SelectedIndex = 2;
+                    else if (_settings.TapAction == "none") _tapCombo.SelectedIndex = 3;
                     else _tapCombo.SelectedIndex = 0;
                 }
                 if (_longPress != null)

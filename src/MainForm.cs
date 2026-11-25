@@ -401,6 +401,9 @@ namespace CapsLockLite
 
             _listCard = new MCard();
             _listCard.Padding = new Padding(1);
+            // A full-bleed list needs square corners: the rounded card behind it
+            // would leave a mismatched corner ring.
+            _listCard.Radius = 0;
             page.Controls.Add(_listCard);
 
             _list = new MListView();
@@ -468,8 +471,46 @@ namespace CapsLockLite
 
             int footer = Theme.S(22);
             int listTop = sectionBottom + (_keyboardProgress > 0.02f ? Theme.S(12) : Theme.S(8));
-            _listCard.SetBounds(0, listTop, w,
-                Math.Max(Theme.S(70), h - listTop - footer - Theme.S(6)));
+            int listHeight = Math.Max(Theme.S(70), h - listTop - footer - Theme.S(6));
+
+            // The mouse card sits beside the list and matches the numpad column of
+            // the board above it: same left edge (18.5u) and same right edge (22.5u),
+            // so the two surfaces line up instead of drifting with window size.
+            int mouseGap = Theme.S(12);
+            int boardPad = Theme.S(2);
+            float keyUnit = Math.Min(
+                Math.Max(1f, w - boardPad * 2) / KeyboardLayout.TotalWidth,
+                (float)boardHeight / KeyboardLayout.TotalHeight);
+            int boardRight = (int)Math.Round(boardPad
+                + (w - boardPad * 2 - keyUnit * KeyboardLayout.TotalWidth) / 2f
+                + keyUnit * KeyboardLayout.TotalWidth);
+            int railWidth = Theme.S(30);
+            int openWidth = Math.Max(Theme.S(120), (int)Math.Round(keyUnit * 4f));
+            // The card width follows the collapse animation, so the list keeps
+            // growing into the space the card gives up frame by frame.
+            int mouseWidth = (int)Math.Round(railWidth + (openWidth - railWidth)
+                * (1f - _mouseProgress));
+            if (mouseWidth < railWidth) mouseWidth = railWidth;
+            if (mouseWidth > openWidth) mouseWidth = openWidth;
+            bool showMouse = _mousePad != null && w >= Theme.S(860);
+            if (_mousePad != null)
+            {
+                _mousePad.Visible = showMouse;
+                if (showMouse)
+                {
+                    // The card is exactly four key units wide, so the badge inside it
+                    // can use the board's key unit and match a keycap badge 1:1. The
+                    // body is laid out for the open width and slides out as the card
+                    // narrows, so collapsing never squashes the mouse.
+                    _mousePad.BadgeUnit = keyUnit;
+                    _mousePad.ExpandedWidth = openWidth;
+                    _mousePad.SetBounds(boardRight - mouseWidth, listTop, mouseWidth, listHeight);
+                }
+            }
+            int listWidth = showMouse
+                ? Math.Max(Theme.S(260), boardRight - mouseWidth - mouseGap)
+                : w;
+            _listCard.SetBounds(0, listTop, listWidth, listHeight);
             if (_list != null)
             {
                 _list.SetBounds(1, 1,
@@ -1726,6 +1767,23 @@ namespace CapsLockLite
                 _keyboardTarget = 0.55f;
                 LayoutContent();
             }));
+            else if (_demo == "mousecollapsed") BeginInvoke(new Action(delegate
+            {
+                _mouseProgress = 1f;
+                if (_mousePad != null) _mousePad.CollapseProgress = 1f;
+                _mousePadCollapsed = true;
+                LayoutContent();
+            }));
+            else if (_demo == "mousemid") BeginInvoke(new Action(delegate
+            {
+                _mouseProgress = 0.55f;
+                if (_mousePad != null) _mousePad.CollapseProgress = 0.55f;
+                LayoutContent();
+            }));
+            else if (_demo == "mousetoggle") BeginInvoke(new Action(delegate
+            {
+                StartMouseAnimation(_mouseProgress > 0.5f ? 0f : 1f);
+            }));
             else if (_demo == "keymenu") BeginInvoke(new Action(ShowMoreMenu));
             else if (_demo == "keytoggle") BeginInvoke(new Action(ToggleKeyboard));
             else if (_demo == "keylarge") BeginInvoke(new Action(delegate
@@ -1944,6 +2002,7 @@ namespace CapsLockLite
             if (disposing)
             {
                 DisposeKeyboardAnimation();
+                DisposeMouseAnimation();
                 if (_windowSaveTimer != null) { _windowSaveTimer.Dispose(); _windowSaveTimer = null; }
                 if (_infoTimer != null) { _infoTimer.Dispose(); _infoTimer = null; }
                 if (_tray != null)

@@ -31,6 +31,17 @@ namespace CapsLockLite
         public string PluginId { get; private set; }
         public IPluginAction PluginAction { get; private set; }
 
+        /// <summary>Values of a drop-down parameter, in the order the plugin listed them.</summary>
+        public string[] ChoiceValues { get; private set; }
+
+        /// <summary>Human labels of a drop-down parameter, parallel to <see cref="ChoiceValues"/>.</summary>
+        public string[] ChoiceLabels { get; private set; }
+
+        public int ChoiceCount
+        {
+            get { return ChoiceValues == null ? 0 : ChoiceValues.Length; }
+        }
+
         public ActionDef(string id, string category, string name, string description,
             ActionParamKind paramKind, string defaultParam, bool repeatable)
         {
@@ -41,6 +52,8 @@ namespace CapsLockLite
             ParamKind = paramKind;
             DefaultParam = defaultParam;
             Repeatable = repeatable;
+            ChoiceValues = new string[0];
+            ChoiceLabels = new string[0];
         }
 
         public static ActionDef ForPlugin(string pluginId, IPluginAction action, string fullId)
@@ -55,7 +68,74 @@ namespace CapsLockLite
             def.IsPlugin = true;
             def.PluginId = pluginId;
             def.PluginAction = action;
+            if (action.ParamKind == ActionParamKind.Select)
+                def.UseChoices(action as IPluginParamChoices);
             return def;
+        }
+
+        /// <summary>
+        /// Reads the drop-down items of a Select action. "value|label" splits into the
+        /// value the plugin receives and the label the user sees; a bare item uses the
+        /// same text for both. Blank items are dropped, so a sloppy plugin cannot add
+        /// an empty row to the editor.
+        /// </summary>
+        private void UseChoices(IPluginParamChoices source)
+        {
+            string[] raw = null;
+            try
+            {
+                raw = source == null ? null : source.ParamChoices;
+            }
+            catch
+            {
+                raw = null;
+            }
+            List<string> values = new List<string>();
+            List<string> labels = new List<string>();
+            if (raw != null)
+            {
+                for (int i = 0; i < raw.Length; i++)
+                {
+                    string item = raw[i];
+                    if (item == null) continue;
+                    string value = item;
+                    string label = item;
+                    int bar = item.IndexOf('|');
+                    if (bar >= 0)
+                    {
+                        value = item.Substring(0, bar);
+                        label = item.Substring(bar + 1);
+                    }
+                    value = value.Trim();
+                    label = label.Trim();
+                    if (value.Length == 0) continue;
+                    if (label.Length == 0) label = value;
+                    values.Add(value);
+                    labels.Add(label);
+                }
+            }
+            ChoiceValues = values.ToArray();
+            ChoiceLabels = labels.ToArray();
+        }
+
+        /// <summary>Label shown for a stored drop-down value (falls back to the value).</summary>
+        public string ChoiceLabelOf(string value)
+        {
+            if (value == null) return "";
+            for (int i = 0; i < ChoiceCount; i++)
+                if (string.Equals(ChoiceValues[i], value, StringComparison.Ordinal))
+                    return ChoiceLabels[i];
+            return value;
+        }
+
+        /// <summary>Index of a stored value in the drop-down, or -1.</summary>
+        public int ChoiceIndexOf(string value)
+        {
+            if (value == null) return -1;
+            for (int i = 0; i < ChoiceCount; i++)
+                if (string.Equals(ChoiceValues[i], value, StringComparison.Ordinal))
+                    return i;
+            return -1;
         }
 
         public static ActionDef ForMissing(string fullId)
@@ -373,6 +453,9 @@ namespace CapsLockLite
                     string held = point.ModifierText;
                     return name + "：" + (held.Length == 0 ? "" : held + " + ")
                         + point.ButtonName + " (" + point.X + ", " + point.Y + ")";
+                case ActionParamKind.Select:
+                    if (string.IsNullOrEmpty(param)) return name;
+                    return name + "：" + Shorten(def.ChoiceLabelOf(param), 20);
             }
             return name;
         }
@@ -422,6 +505,16 @@ namespace CapsLockLite
                     return "";
                 case ActionParamKind.MouseClick:
                     return MouseClickPoint.Format(MouseClickPoint.Parse(param));
+                case ActionParamKind.Select:
+                    {
+                        // A stored value that the plugin no longer offers is kept as
+                        // is: the user may be looking at a temporarily unloaded
+                        // plugin, and rewriting the value would silently change what
+                        // the shortcut does once the plugin comes back. A brand new
+                        // row (empty) starts on the first choice.
+                        if (!string.IsNullOrEmpty(param)) return param;
+                        return def.ChoiceCount > 0 ? def.ChoiceValues[0] : "";
+                    }
                 default:
                     return param ?? "";
             }
@@ -469,7 +562,7 @@ namespace CapsLockLite
             a.Add(new ActionDef("launch.folder", launch, "打开文件夹", "在资源管理器中打开指定文件夹。", ActionParamKind.Path, "", false));
             a.Add(new ActionDef("launch.url", launch, "打开网址", "使用默认浏览器打开网址。", ActionParamKind.Url, "https://", false));
             a.Add(new ActionDef("input.text", launch, "输入文本", "向当前窗口输入一段文本（支持中文）。", ActionParamKind.Text, "", false));
-            a.Add(new ActionDef("input.keys", launch, "发送按键", "向当前窗口发送自定义组合键。点按键框后按一个主键，修饰键由上方开关决定。", ActionParamKind.KeyCombo, "", true));
+            a.Add(new ActionDef("input.keys", launch, "发送按键", "向当前窗口发送自定义组合键，也可以是鼠标左键/右键/中键或滚轮上下。点按键框后按一个主键，修饰键由上方开关决定。", ActionParamKind.KeyCombo, "", true));
 
             a.Add(new ActionDef("mouse.click", mouse, "鼠标点击",
                 "在指定坐标点击一次。点「抓取坐标」后窗口会隐藏，按下 CapsLock 记录鼠标位置（Esc 取消）。",

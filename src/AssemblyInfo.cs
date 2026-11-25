@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
@@ -7,6 +7,6 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyProduct("CapsLock Lite")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyCopyright("Copyright © 2026")]
-[assembly: AssemblyVersion("1.21.4.0")]
-[assembly: AssemblyFileVersion("1.21.4.0")]
+[assembly: AssemblyVersion("1.25.2.0")]
+[assembly: AssemblyFileVersion("1.25.2.0")]
 [assembly: ComVisible(false)]

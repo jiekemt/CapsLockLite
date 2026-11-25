@@ -773,8 +773,28 @@ namespace CapsLockLite
         private Keys _key = Keys.None;
         private bool _hover;
         private bool _capsBefore;
+        private bool _allowMouse;
+        private bool _mouseArmed;
+        private MouseHook _mouseHook;
 
         public event EventHandler KeyChanged;
+
+        /// <summary>
+        /// Lets the box also record the five mouse triggers. Off by default: the
+        /// trigger field of a shortcut only takes a keyboard key plus the modifier
+        /// chips, while the "发送按键" combination accepts a mouse button too.
+        /// </summary>
+        public bool AllowMouse
+        {
+            get { return _allowMouse; }
+            set
+            {
+                _allowMouse = value;
+                if (value && Focused) ArmMouse();
+                else StopMouseHook();
+                Invalidate();
+            }
+        }
 
         public Keys KeyCode
         {
@@ -814,7 +834,10 @@ namespace CapsLockLite
             Color stroke = Focused ? Theme.Accent : (_hover ? Theme.StrokeStrong : Theme.Stroke);
             Theme.StrokeRound(g, r, Theme.SF(Theme.RadiusControl), stroke, 1f);
 
-            string text = _key == Keys.None ? "点击后按一个键" : KeyText.FormatKey(_key);
+            string text;
+            if (_key != Keys.None) text = KeyText.FormatKey(_key);
+            else if (_allowMouse && Focused) text = "等待按键或鼠标…";
+            else text = _allowMouse ? "按一个键或鼠标" : "点击后按一个键";
             TextRenderer.DrawText(g, text, _key == Keys.None ? Theme.Body : Theme.BodyStrong,
                 ClientRectangle, _key == Keys.None ? Theme.TextTertiary : Theme.TextPrimary,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
@@ -831,7 +854,7 @@ namespace CapsLockLite
             e.Handled = true;
             e.SuppressKeyPress = true;
             if (KeyText.IsModifier(e.KeyCode) || e.KeyCode == Keys.CapsLock) return;
-            KeyCode = e.KeyCode & Keys.KeyCode;
+            CaptureKey(e.KeyCode & Keys.KeyCode);
         }
 
         protected override void OnKeyUp(KeyEventArgs e)
@@ -863,10 +886,20 @@ namespace CapsLockLite
             Keys key = keyData & Keys.KeyCode;
             if (key == Keys.Escape || IsNavigationKey(key))
             {
-                KeyCode = key;
+                CaptureKey(key);
                 return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        /// <summary>
+        /// A keyboard key ends the mouse recording too: leaving the hook armed
+        /// would turn the next click on "保存" into a mouse trigger.
+        /// </summary>
+        private void CaptureKey(Keys key)
+        {
+            _mouseArmed = false;
+            KeyCode = key;
         }
 
         private static bool IsNavigationKey(Keys key)
@@ -906,17 +939,92 @@ namespace CapsLockLite
         }
 
         protected override void OnKeyPress(KeyPressEventArgs e) { e.Handled = true; base.OnKeyPress(e); }
-        protected override void OnMouseDown(MouseEventArgs e) { Focus(); base.OnMouseDown(e); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            Focus();
+            // A second click on an already-focused box starts a fresh recording:
+            // the previous capture disarmed the hook so normal clicks could reach
+            // the dialog buttons again.
+            if (_allowMouse && Focused) ArmMouse();
+            base.OnMouseDown(e);
+        }
         protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
-        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnGotFocus(EventArgs e)
+        {
+            if (_allowMouse) ArmMouse();
+            Invalidate();
+            base.OnGotFocus(e);
+        }
+        protected override void OnLostFocus(EventArgs e)
+        {
+            StopMouseHook();
+            Invalidate();
+            base.OnLostFocus(e);
+        }
+
+        private void ArmMouse()
+        {
+            if (!_allowMouse) return;
+            _mouseArmed = true;
+            if (_mouseHook == null)
+            {
+                _mouseHook = new MouseHook();
+                _mouseHook.MouseEvent += OnMouseHook;
+            }
+            if (!_mouseHook.IsInstalled) _mouseHook.Install();
+        }
+
+        private void StopMouseHook()
+        {
+            _mouseArmed = false;
+            if (_mouseHook != null) _mouseHook.Uninstall();
+        }
+
+        /// <summary>
+        /// Records the first mouse button or wheel notch while armed, then
+        /// disarms: the dialog must stay clickable after the key was recorded.
+        /// </summary>
+        private bool OnMouseHook(MouseButtonEventArgs e)
+        {
+            if (!_allowMouse || !_mouseArmed || IsDisposed || !Focused) return false;
+            return CaptureMouse(e);
+        }
+
+        private bool CaptureMouse(MouseButtonEventArgs e)
+        {
+            if (!_allowMouse) return false;
+            if (e.IsInjected || (!e.IsDown && !e.IsWheel)) return false;
+            _mouseArmed = false;
+            KeyCode = e.Key & Keys.KeyCode;
+            return true;
+        }
+
+        /// <summary>Self-test hook: replays a mouse event through the capturer.</summary>
+        internal bool CaptureMouseForTest(MouseButtonEventArgs e)
+        {
+            _mouseArmed = true;
+            return CaptureMouse(e);
+        }
+
+        /// <summary>Self-test hook: is the mouse recording armed right now?</summary>
+        internal bool MouseArmedForTest
+        {
+            get { return _mouseArmed; }
+        }
+
+        /// <summary>Self-test hook: replays a keyboard capture.</summary>
+        internal void CaptureKeyForTest(Keys key)
+        {
+            CaptureKey(key);
+        }
     }
 
     /// <summary>Rounded surface used for grouped settings.</summary>
     internal sealed class MCard : Panel
     {
         private readonly List<int> _separators = new List<int>();
+        private int _radius = -1;
 
         public MCard()
         {
@@ -935,6 +1043,23 @@ namespace CapsLockLite
             _separators.Add(y);
         }
 
+        /// <summary>
+        /// Corner radius override. -1 keeps the theme radius; 0 makes the card a
+        /// plain rectangle, which is what a full-bleed child such as the shortcut
+        /// list needs (a rounded card behind a square list shows a mismatched
+        /// corner ring).
+        /// </summary>
+        public int Radius
+        {
+            get { return _radius; }
+            set
+            {
+                if (_radius == value) return;
+                _radius = value;
+                Invalidate();
+            }
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -942,7 +1067,7 @@ namespace CapsLockLite
             using (SolidBrush b = new SolidBrush(Theme.Background))
                 g.FillRectangle(b, ClientRectangle);
             RectangleF r = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
-            float radius = Theme.SF(Theme.RadiusCard);
+            float radius = Theme.SF(_radius < 0 ? Theme.RadiusCard : _radius);
             Theme.FillRound(g, r, radius, Theme.Surface);
             Theme.StrokeRound(g, r, radius, Theme.Stroke, 1f);
 

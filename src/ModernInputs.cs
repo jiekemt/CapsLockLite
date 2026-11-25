@@ -977,6 +977,9 @@ namespace CapsLockLite
             _win = MakeChip("Win");
 
             _key = new MKeyCapture();
+            // The key field records a mouse button too: "发送按键" can click or
+            // scroll, so a mouse key is a legal combination here.
+            _key.AllowMouse = true;
             Controls.Add(_key);
 
             _preview = Theme.MakeLine("", new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold),
@@ -1025,6 +1028,12 @@ namespace CapsLockLite
         public Keys KeyCode
         {
             get { return _key.KeyCode; }
+        }
+
+        /// <summary>Self-test hook: the key box accepts the five mouse keys here.</summary>
+        internal bool RecordsMouse
+        {
+            get { return _key.AllowMouse; }
         }
 
         private MChipToggle MakeChip(string text)

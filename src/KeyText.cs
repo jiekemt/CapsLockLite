@@ -76,6 +76,14 @@ namespace CapsLockLite
                 case Keys.VolumeUp: return "音量+";
                 case Keys.VolumeDown: return "音量−";
                 case Keys.VolumeMute: return "静音";
+                // Mouse triggers are usable both as the main key of a shortcut and,
+                // since 1.25.2, as the key a "发送按键" action sends; the labels are
+                // parsed back in ParseKeyName.
+                case (Keys)MouseKeys.Left: return "鼠标左键";
+                case (Keys)MouseKeys.Right: return "鼠标右键";
+                case (Keys)MouseKeys.Middle: return "鼠标中键";
+                case (Keys)MouseKeys.WheelUp: return "滚轮上滑";
+                case (Keys)MouseKeys.WheelDown: return "滚轮下滑";
                 case Keys.None: return "未设置";
             }
             if (key >= Keys.A && key <= Keys.Z)
@@ -229,6 +237,10 @@ namespace CapsLockLite
                 }
             }
             if (s.Equals("+", StringComparison.OrdinalIgnoreCase) || s.Equals("Plus", StringComparison.OrdinalIgnoreCase)) return Keys.Oemplus;
+            // The five mouse triggers are legal keys to send: "发送按键" can click or
+            // scroll, with or without Ctrl/Alt/Shift/Win held around it.
+            Keys mouse;
+            if (TryParseMouseKey(s, out mouse)) return mouse;
             // Arrow keys are shown as glyphs in the editor and stored that way in
             // the parameter string, so the parser has to accept both spellings.
             if (s == "↑") return Keys.Up;
@@ -266,6 +278,51 @@ namespace CapsLockLite
             {
                 return Keys.None;
             }
+        }
+
+        /// <summary>
+        /// The five mouse spellings, both the label <see cref="FormatKey"/> writes and
+        /// the terse English form a hand-edited config or a macro file may use.
+        /// </summary>
+        private static bool TryParseMouseKey(string text, out Keys key)
+        {
+            key = Keys.None;
+            if (string.IsNullOrEmpty(text)) return false;
+            string flat = text.Replace(" ", "").Replace("_", string.Empty).ToUpperInvariant();
+            switch (flat)
+            {
+                case "鼠标左键":
+                case "鼠标左":
+                case "MOUSELEFT":
+                case "MOUSEL":
+                    key = (Keys)MouseKeys.Left;
+                    return true;
+                case "鼠标右键":
+                case "鼠标右":
+                case "MOUSERIGHT":
+                case "MOUSER":
+                    key = (Keys)MouseKeys.Right;
+                    return true;
+                case "鼠标中键":
+                case "鼠标中":
+                case "MOUSEMIDDLE":
+                case "MOUSEM":
+                    key = (Keys)MouseKeys.Middle;
+                    return true;
+                case "滚轮上滑":
+                case "滚轮上":
+                case "WHEELUP":
+                case "MOUSEWHEELUP":
+                    key = (Keys)MouseKeys.WheelUp;
+                    return true;
+                case "滚轮下滑":
+                case "滚轮下":
+                case "WHEELDOWN":
+                case "MOUSEWHEELDOWN":
+                    key = (Keys)MouseKeys.WheelDown;
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>

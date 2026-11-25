@@ -188,8 +188,56 @@ public sealed class PluginContext
 | `Url` | 单行输入 | 网址（可省略协议） |
 | `Text` | 多行输入 | 任意文本 |
 | `KeyCombo` | 内联组合键编辑（修饰键开关 + 按键捕获 + 预览） | 形如 `Ctrl + Shift + ←` |
+| `MouseClick` | 鼠标点击设置（修饰键 + 左/中/右键 + 坐标） | 形如 `L;120;340`，带修饰键时 `L;120;340;CA` |
+| `Select` | 下拉框（选项由插件声明） | 必须是插件列出的某个值，见 4.4.1 |
 
 参数**始终以字符串传入**，请按 `ParamKind` 自行解析；`Param` 不会为 `null`。
+
+### 4.4.1 下拉框（`ActionParamKind.Select`，1.25.2 起）
+
+动作的 `ParamKind` 返回 `Select` 时，编辑器给的是**下拉框**，用户只能从你列出的值里挑，
+`Param` 永远不会是别的字符串。选项在**另一个可选接口**里声明：
+
+```csharp
+using CapsLockLite;
+
+public sealed class ThemeAction : IPluginAction, IPluginParamChoices
+{
+    public string Id { get { return "theme"; } }
+    public string Category { get { return "外观"; } }
+    public string Name { get { return "切换主题"; } }
+    public string Description { get { return "按设定的深浅色切换。"; } }
+    public ActionParamKind ParamKind { get { return ActionParamKind.Select; } }
+    public string DefaultParam { get { return "dark"; } }
+    public bool Repeatable { get { return false; } }
+
+    // 每项是 "值" 或 "值|显示名"：显示名给用户看，值原样传进 Param。
+    public string[] ParamChoices
+    {
+        get { return new[] { "dark|深色", "light|浅色", "auto|跟随系统" }; }
+    }
+
+    public void Execute(PluginContext context)
+    {
+        switch (context.Param)
+        {
+            case "light": /* ... */ break;
+            case "auto": /* ... */ break;
+            default: /* dark */ break;
+        }
+    }
+}
+```
+
+规则：
+
+- **不要改 `IPluginAction`**：给已有接口加成员会让所有旧插件编译失败，所以选项放在可选的
+  `IPluginParamChoices` 上；不用下拉框的动作完全不用实现它。
+- 选项里值为空或整项为空会被丢弃，不会出现空行。
+- `DefaultParam` 命中某一项时，新绑定的快捷键默认选它；**没命中时用第一项**。
+- 用户已经存下的值如果不在当前列表里（例如你换成版本后删了某个选项），宿主管不动它：
+  快捷键仍保留原值，等你把它加回来就自动恢复；所以请保持值字符串稳定，显示名可以随时改。
+- 第 1.25.2 版之前的宿主不认识 `Select`，插件文件在旧版上会编译失败（`CS0117`）。
 
 ### 4.5 可选：插件设置页
 

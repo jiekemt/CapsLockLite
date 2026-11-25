@@ -77,6 +77,8 @@ namespace CapsLockLite
 
             MCard card = new MCard();
             card.Padding = new Padding(1);
+            // Full-bleed list: a rounded card would leave a corner ring behind it.
+            card.Radius = 0;
             Controls.Add(card);
 
             _list = new MListView();

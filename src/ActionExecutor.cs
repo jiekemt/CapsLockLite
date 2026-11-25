@@ -44,6 +44,8 @@ namespace CapsLockLite
             public bool Alt;
             public bool Shift;
             public bool Win;
+            /// <summary>A mouse button stays down like a key does; it never auto-repeats.</summary>
+            public bool Mouse;
         }
 
         private readonly List<HeldKey> _holds = new List<HeldKey>();
@@ -320,7 +322,104 @@ namespace CapsLockLite
                 if (_host != null) _host.ShowStatus("自定义按键格式无效：" + param, MInfoSeverity.Error);
                 return;
             }
+            // A mouse key is not a virtual key: it goes out as a real click or wheel
+            // notch, with the combination's modifiers held around it.
+            if (MouseKeys.IsMouseKey(key))
+            {
+                SendMouseKeyClick(key, ctrl, alt, shift, win);
+                return;
+            }
             Native.SendKeyCombo(key, ctrl, alt, shift, win, 1);
+        }
+
+        /// <summary>Marker every synthetic mouse event carries (see ClickAt).</summary>
+        private static UIntPtr SyntheticMouseMarker()
+        {
+            return (UIntPtr)(ulong)Native.SyntheticMarker.ToInt64();
+        }
+
+        /// <summary>
+        /// Wheel delta for a notch key (+120 up, -120 down), or 0 when the key is not
+        /// a wheel. <see cref="Native.MOUSEEVENTF_WHEEL"/> carries the delta, not a flag.
+        /// </summary>
+        internal static int MouseWheelDelta(Keys key)
+        {
+            if ((key & Keys.KeyCode) == (Keys)MouseKeys.WheelUp) return 120;
+            if ((key & Keys.KeyCode) == (Keys)MouseKeys.WheelDown) return -120;
+            return 0;
+        }
+
+        /// <summary>mouse_event flag for one mouse button, or 0 for anything else.</summary>
+        internal static uint MouseButtonFlag(Keys key, bool up)
+        {
+            switch (key & Keys.KeyCode)
+            {
+                case (Keys)MouseKeys.Left:
+                    return up ? Native.MOUSEEVENTF_LEFTUP : Native.MOUSEEVENTF_LEFTDOWN;
+                case (Keys)MouseKeys.Right:
+                    return up ? Native.MOUSEEVENTF_RIGHTUP : Native.MOUSEEVENTF_RIGHTDOWN;
+                case (Keys)MouseKeys.Middle:
+                    return up ? Native.MOUSEEVENTF_MIDDLEUP : Native.MOUSEEVENTF_MIDDLEDOWN;
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// One mouse button press or release. A wheel notch has no up state: it fires
+        /// a single notch on the down call and ignores the release. The event carries
+        /// the app's marker so the low-level hook never reads it back as a Caps +
+        /// 鼠标 trigger.
+        /// </summary>
+        private static void SendMouseState(Keys key, bool up)
+        {
+            int delta = MouseWheelDelta(key);
+            if (delta != 0)
+            {
+                if (up) return;
+                Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)delta),
+                    SyntheticMouseMarker());
+                return;
+            }
+            uint flag = MouseButtonFlag(key, up);
+            if (flag == 0) return;
+            Native.mouse_event(flag, 0, 0, 0, SyntheticMouseMarker());
+        }
+
+        /// <summary>
+        /// A complete mouse "key press": modifiers down, the button or notch, the
+        /// button up, modifiers up. Same shape the 鼠标点击 action uses, minus the
+        /// cursor move — this one clicks wherever the pointer already is.
+        /// </summary>
+        private void SendMouseKeyClick(Keys key, bool ctrl, bool alt, bool shift, bool win)
+        {
+            Native.InputBatch held = new Native.InputBatch();
+            if (ctrl) held.Down(Keys.LControlKey);
+            if (alt) held.Down(Keys.LMenu);
+            if (shift) held.Down(Keys.LShiftKey);
+            if (win) held.Down(Keys.LWin);
+            bool pressing = (ctrl || alt || shift || win) && held.Send();
+            if (pressing) Thread.Sleep(10);
+            try
+            {
+                SendMouseState(key, false);
+                if (!MouseKeys.IsWheel(key))
+                {
+                    Thread.Sleep(10);
+                    SendMouseState(key, true);
+                }
+            }
+            finally
+            {
+                if (pressing)
+                {
+                    Native.InputBatch batch = new Native.InputBatch();
+                    if (win) batch.Up(Keys.LWin);
+                    if (shift) batch.Up(Keys.LShiftKey);
+                    if (alt) batch.Up(Keys.LMenu);
+                    if (ctrl) batch.Up(Keys.LControlKey);
+                    batch.Send();
+                }
+            }
         }
 
         /// <summary>
@@ -341,6 +440,33 @@ namespace CapsLockLite
             {
                 if (_host != null) _host.ShowStatus("自定义按键格式无效：" + mapping.Param, MInfoSeverity.Error);
                 return false;
+            }
+
+            // A mouse button is held like a key: down on press, up on release, no
+            // auto-repeat. A wheel notch has no up state, so it only fires once.
+            if (MouseKeys.IsMouseKey(key))
+            {
+                if (MouseKeys.IsWheel(key))
+                {
+                    SendMouseKeyClick(key, ctrl, alt, shift, win);
+                    return false;
+                }
+                HeldKey mouse = new HeldKey();
+                mouse.Mapping = mapping;
+                mouse.Key = key;
+                mouse.Ctrl = ctrl;
+                mouse.Alt = alt;
+                mouse.Shift = shift;
+                mouse.Win = win;
+                mouse.Mouse = true;
+                _holds.Add(mouse);
+
+                if (ctrl) Native.SendKeyState(Keys.LControlKey, false);
+                if (alt) Native.SendKeyState(Keys.LMenu, false);
+                if (shift) Native.SendKeyState(Keys.LShiftKey, false);
+                if (win) Native.SendKeyState(Keys.LWin, false);
+                SendMouseState(key, false);
+                return true;
             }
 
             HeldKey hold = new HeldKey();
@@ -378,6 +504,9 @@ namespace CapsLockLite
                 ? (_holds.Count > 0 ? _holds[_holds.Count - 1] : null)
                 : FindHold(mapping);
             if (hold == null) return false;
+            // A held mouse button does not auto-repeat: re-sending the down event
+            // would only spam the target with presses it already has.
+            if (hold.Mouse) return false;
             return Native.SendKeyState(hold.Key, false);
         }
 
@@ -411,7 +540,11 @@ namespace CapsLockLite
             {
                 if (_holds[i].Key == hold.Key) sameKey = true;
             }
-            if (!sameKey) Native.SendKeyState(hold.Key, true);
+            if (!sameKey)
+            {
+                if (hold.Mouse) SendMouseState(hold.Key, true);
+                else Native.SendKeyState(hold.Key, true);
+            }
 
             if (hold.Win && !AnyHeld(false, false, false, true)) Native.SendKeyState(Keys.LWin, true);
             if (hold.Shift && !AnyHeld(false, false, true, false)) Native.SendKeyState(Keys.LShiftKey, true);
@@ -476,9 +609,12 @@ namespace CapsLockLite
                         up = Native.MOUSEEVENTF_LEFTUP;
                         break;
                 }
-                Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+                // Mark the click as ours so the low-level mouse hook never turns it
+                // back into a Caps+鼠标 trigger.
+                UIntPtr marker = (UIntPtr)(ulong)Native.SyntheticMarker.ToInt64();
+                Native.mouse_event(down, 0, 0, 0, marker);
                 Thread.Sleep(10);
-                Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+                Native.mouse_event(up, 0, 0, 0, marker);
                 Thread.Sleep(10);
             }
             finally

@@ -38,6 +38,7 @@ namespace CapsLockLite
         private int _contentTop;
         private ActionDef _def;
         private MNumberBox _count;
+        private MComboBox _choice;
         private MTextBox _text;
         private MTextArea _area;
         private MKeyComboField _comboField;
@@ -96,7 +97,7 @@ namespace CapsLockLite
             _actionDesc.Text = _def.Description;
             UpdatePreview();
 
-            EventHandler changed = delegate { UpdatePreview(); };
+            EventHandler changed = delegate { UpdateModeState(); UpdatePreview(); };
             _caps.CheckedChanged += changed;
             _ctrl.CheckedChanged += changed;
             _alt.CheckedChanged += changed;
@@ -133,6 +134,9 @@ namespace CapsLockLite
             _triggerCard.Controls.Add(_keyCaption);
 
             _key = new MKeyCapture();
+            // Only the shortcut trigger accepts mouse buttons/wheel; the
+            // "发送按键" parameter keeps a keyboard-only capture box.
+            _key.AllowMouse = true;
             _triggerCard.Controls.Add(_key);
 
             _modeCaption = Theme.MakeLine("触发类型", Theme.Body, Theme.TextSecondary, 0, 0, Theme.S(68));
@@ -144,7 +148,7 @@ namespace CapsLockLite
             _triggerCard.Controls.Add(_mode);
 
             _hint = Theme.MakeLine(
-                "点击输入框后按一个主键；修饰键由上方开关决定，无需真的按住 Caps Lock。",
+                "点击输入框后按一个主键或鼠标键（含滚轮）；修饰键由上方开关决定。",
                 Theme.Caption, Theme.TextTertiary, 0, 0, Theme.S(200));
             _triggerCard.Controls.Add(_hint);
         }
@@ -313,7 +317,10 @@ namespace CapsLockLite
 
         private void UpdateModeState()
         {
-            bool repeatable = _def != null && _def.Repeatable;
+            // A wheel notch has no key-up, so "按住连发" cannot mean anything for
+            // it; mouse buttons keep the normal hold behaviour.
+            bool repeatable = _def != null && _def.Repeatable
+                && !MouseKeys.IsWheel(_key.KeyCode);
             // The segmented control owns its disabled look and cursor; it also
             // refuses clicks while disabled, so no extra guard is needed here.
             _mode.Enabled = repeatable;
@@ -348,6 +355,7 @@ namespace CapsLockLite
                 old.Dispose();
             }
             _count = null;
+            _choice = null;
             _text = null;
             _area = null;
             _comboField = null;
@@ -367,6 +375,7 @@ namespace CapsLockLite
             else if (def.ParamKind == ActionParamKind.Text) label = "文本";
             else if (def.ParamKind == ActionParamKind.KeyCombo) label = "组合键";
             else if (def.ParamKind == ActionParamKind.MouseClick) label = "点击设置";
+            else if (def.ParamKind == ActionParamKind.Select) label = "选项";
 
             _paramCaption = Theme.MakeLabel(label, Theme.Body, Theme.TextSecondary,
                 0, Theme.S(6), Theme.S(70), Theme.S(22));
@@ -402,6 +411,18 @@ namespace CapsLockLite
             {
                 _text = MakeTextBox(value);
                 _paramHost.Controls.Add(_text);
+            }
+            else if (def.ParamKind == ActionParamKind.Select)
+            {
+                // Drop-down declared by the plugin (IPluginParamChoices): the stored
+                // value can never be something the action does not understand, and a
+                // value the plugin stopped offering stays selected but is not lost.
+                _choice = new MComboBox();
+                for (int i = 0; i < def.ChoiceCount; i++) _choice.Items.Add(def.ChoiceLabels[i]);
+                int index = def.ChoiceIndexOf(value);
+                if (index < 0 && def.ChoiceCount > 0) index = 0;
+                if (_choice.Items.Count > 0) _choice.SelectedIndex = index < 0 ? 0 : index;
+                _paramHost.Controls.Add(_choice);
             }
             else if (def.ParamKind == ActionParamKind.Text)
             {
@@ -503,6 +524,12 @@ namespace CapsLockLite
                 _area.SetBounds(fieldLeft, Theme.S(2),
                     Math.Max(Theme.S(80), _paramHost.Width - fieldLeft), Theme.S(96));
             }
+            else if (_choice != null)
+            {
+                int width = Math.Max(Theme.S(160),
+                    Math.Min(Theme.S(320), _paramHost.Width - fieldLeft));
+                _choice.SetBounds(fieldLeft, Theme.S(2), width, Theme.S(30));
+            }
             else if (_text != null)
             {
                 if (_def.ParamKind == ActionParamKind.Url)
@@ -553,6 +580,13 @@ namespace CapsLockLite
                 return (_count == null ? 1 : _count.Value).ToString();
             if (_def.ParamKind == ActionParamKind.KeyCombo)
                 return _comboField == null ? "" : _comboField.ComboText.Trim();
+            if (_def.ParamKind == ActionParamKind.Select)
+            {
+                int index = _choice == null ? -1 : _choice.SelectedIndex;
+                if (index < 0 || index >= _def.ChoiceCount)
+                    return _def.ChoiceCount > 0 ? _def.ChoiceValues[0] : "";
+                return _def.ChoiceValues[index];
+            }
             if (_area != null) return _area.Text.Trim();
             if (_point != null) return _point.Value;
             return _text == null ? "" : _text.Text.Trim();
@@ -636,7 +670,8 @@ namespace CapsLockLite
             _mapping.Param = ActionCatalog.NormalizeParam(_def.Id, param);
             _mapping.Note = _note == null ? "" : _note.Text.Trim();
             if (_mapping.Note.Length > 40) _mapping.Note = _mapping.Note.Substring(0, 40);
-            _mapping.TriggerMode = _def.Repeatable && _mode.SelectedIndex == 1 ? "hold" : "once";
+            _mapping.TriggerMode = _def.Repeatable && _mode.SelectedIndex == 1
+                && !MouseKeys.IsWheel(key) ? "hold" : "once";
             _mapping.Enabled = _isNew || _mapping.Enabled;
             if (string.IsNullOrEmpty(_mapping.Id)) _mapping.Id = Guid.NewGuid().ToString("N");
 

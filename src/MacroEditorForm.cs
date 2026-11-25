@@ -112,6 +112,8 @@ namespace CapsLockLite
 
             _stepsCard = new MCard();
             _stepsCard.Padding = new Padding(1);
+            // Full-bleed list: a rounded card would leave a corner ring behind it.
+            _stepsCard.Radius = 0;
             Controls.Add(_stepsCard);
 
             _steps = new MListView();
@@ -615,6 +617,8 @@ namespace CapsLockLite
             int top = Theme.DialogHeader(this, "选择宏", "嵌套后会按顺序执行这个宏的全部步骤。");
             MCard card = new MCard();
             card.Padding = new Padding(1);
+            // Full-bleed list: a rounded card would leave a corner ring behind it.
+            card.Radius = 0;
             Controls.Add(card);
             _list = new MListView();
             _list.RowHeight = Theme.S(52);
@@ -686,6 +690,7 @@ namespace CapsLockLite
         private MTextArea _area;
         private MButton _browse;
         private MNumberBox _number;
+        private MComboBox _choice;
         private MKeyComboField _comboField;
         private MMousePointField _point;
         private MNumberBox _delay;
@@ -763,6 +768,8 @@ namespace CapsLockLite
             _number.Minimum = 1;
             _number.Maximum = 9999;
             _card.Controls.Add(_number);
+            _choice = new MComboBox();
+            _card.Controls.Add(_choice);
             _comboField = new MKeyComboField();
             _comboField.ComboChanged += delegate { if (_error != null) _error.Text = ""; };
             _card.Controls.Add(_comboField);
@@ -860,6 +867,8 @@ namespace CapsLockLite
             _paramLabel.Location = new Point(Theme.S(16), y + Theme.S(2));
             _text.SetBounds(fieldLeft, y, fieldWidth, Theme.S(30));
             _number.SetBounds(fieldLeft, y + Theme.S(1), Theme.S(96), Theme.S(30));
+            _choice.SetBounds(fieldLeft, y, Math.Max(Theme.S(160),
+                Math.Min(Theme.S(320), innerWidth)), Theme.S(30));
             // The send-keys parameter is the same inline field the shortcut editor
             // uses (modifier chips + key capture + live preview), not a read-only
             // box that opens a second dialog.
@@ -920,12 +929,26 @@ namespace CapsLockLite
             _browse.Visible = false;
             _comboField.Visible = false;
             _point.Visible = false;
+            _choice.Visible = false;
             switch (def.ParamKind)
             {
                 case ActionParamKind.Count:
                     _number.Visible = true;
                     _number.Value = ActionCatalog.ParseCount(_step.Param, 1);
                     _paramLabel.Text = "次数";
+                    break;
+                case ActionParamKind.Select:
+                    // Same drop-down the shortcut editor uses, so a plugin action
+                    // cannot get a hand-typed value inside a macro step either.
+                    _choice.Visible = true;
+                    _choice.Items.Clear();
+                    for (int i = 0; i < def.ChoiceCount; i++) _choice.Items.Add(def.ChoiceLabels[i]);
+                    {
+                        int index = def.ChoiceIndexOf(_step.Param);
+                        if (index < 0 && def.ChoiceCount > 0) index = 0;
+                        if (_choice.Items.Count > 0) _choice.SelectedIndex = index < 0 ? 0 : index;
+                    }
+                    _paramLabel.Text = "选项";
                     break;
                 case ActionParamKind.MouseClick:
                     _point.Visible = true;
@@ -1008,6 +1031,14 @@ namespace CapsLockLite
                 case ActionParamKind.MouseClick:
                     _step.Param = _point.Value;
                     break;
+                case ActionParamKind.Select:
+                    {
+                        int index = _choice.SelectedIndex;
+                        _step.Param = index >= 0 && index < _def.ChoiceCount
+                            ? _def.ChoiceValues[index]
+                            : (_def.ChoiceCount > 0 ? _def.ChoiceValues[0] : "");
+                        break;
+                    }
                 default:
                     _step.Param = _text.Text == null ? "" : _text.Text.Trim();
                     break;

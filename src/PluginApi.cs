@@ -18,7 +18,14 @@ namespace CapsLockLite
         Text = 4,
         KeyCombo = 5,
         Folder = 6,
-        MouseClick = 7
+        MouseClick = 7,
+        /// <summary>
+        /// One value out of a fixed list. The action must also implement
+        /// <see cref="IPluginParamChoices"/> to declare the list; the editor then
+        /// shows a drop-down instead of a text box, so the parameter can never be a
+        /// value the plugin does not understand.
+        /// </summary>
+        Select = 8
     }
 
     /// <summary>
@@ -82,6 +89,25 @@ namespace CapsLockLite
         /// <paramref name="context"/> instead of throwing.
         /// </summary>
         void Execute(PluginContext context);
+    }
+
+    /// <summary>
+    /// Optional companion interface for an action whose
+    /// <see cref="IPluginAction.ParamKind"/> is <see cref="ActionParamKind.Select"/>.
+    /// Implement it **in addition to** <see cref="IPluginAction"/>: adding a member
+    /// to the action interface itself would break every plugin compiled against an
+    /// older version, while an optional interface changes nothing for actions that
+    /// do not use a drop-down.
+    /// </summary>
+    public interface IPluginParamChoices
+    {
+        /// <summary>
+        /// Drop-down items, one per entry. Either <c>"value"</c> or
+        /// <c>"value|label"</c>: the label is what the user reads, the value is what
+        /// arrives in <see cref="PluginContext.Param"/>. The first item is used when
+        /// <see cref="IPluginAction.DefaultParam"/> matches none of them.
+        /// </summary>
+        string[] ParamChoices { get; }
     }
 
     /// <summary>

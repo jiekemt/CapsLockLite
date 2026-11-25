@@ -79,9 +79,9 @@ namespace CapsLockLite
                 keys.Add(new KeyCap((Keys)((int)Keys.F5 + i), "F" + (i + 5).ToString(), 6.5f + i, 0f, 1f));
             for (int i = 0; i < 4; i++)
                 keys.Add(new KeyCap((Keys)((int)Keys.F9 + i), "F" + (i + 9).ToString(), 11f + i, 0f, 1f));
-            keys.Add(new KeyCap(Keys.Snapshot, "PrtSc", 15.5f, 0f, 1f));
-            keys.Add(new KeyCap(Keys.Scroll, "ScrLk", 16.5f, 0f, 1f));
-            keys.Add(new KeyCap(Keys.Pause, "Pause", 17.5f, 0f, 1f));
+            keys.Add(new KeyCap(Keys.Snapshot, "PrtSc", 15.25f, 0f, 1f));
+            keys.Add(new KeyCap(Keys.Scroll, "ScrLk", 16.25f, 0f, 1f));
+            keys.Add(new KeyCap(Keys.Pause, "Pause", 17.25f, 0f, 1f));
 
             // ---- row 1: digits and navigation ------------------------------
             Keys[] digits =
@@ -99,9 +99,9 @@ namespace CapsLockLite
             for (int i = 0; i < digits.Length; i++)
                 keys.Add(new KeyCap(digits[i], digitLabels[i], i, 1f, 1f));
             keys.Add(new KeyCap(Keys.Back, "Backspace", 13f, 1f, 2f));
-            keys.Add(new KeyCap(Keys.Insert, "Ins", 15.5f, 1f, 1f));
-            keys.Add(new KeyCap(Keys.Home, "Home", 16.5f, 1f, 1f));
-            keys.Add(new KeyCap(Keys.PageUp, "Page Up", 17.5f, 1f, 1f));
+            keys.Add(new KeyCap(Keys.Insert, "Ins", 15.25f, 1f, 1f));
+            keys.Add(new KeyCap(Keys.Home, "Home", 16.25f, 1f, 1f));
+            keys.Add(new KeyCap(Keys.PageUp, "Page Up", 17.25f, 1f, 1f));
             keys.Add(new KeyCap(Keys.NumLock, "Num Lock", 18.5f, 1f, 1f));
             keys.Add(new KeyCap(Keys.Divide, "/", 19.5f, 1f, 1f));
             keys.Add(new KeyCap(Keys.Multiply, "*", 20.5f, 1f, 1f));
@@ -122,9 +122,9 @@ namespace CapsLockLite
             // ISO keyboards report the same physical key as OemBackslash; accept both.
             backslash.AliasCode = Keys.OemBackslash;
             keys.Add(backslash);
-            keys.Add(new KeyCap(Keys.Delete, "Del", 15.5f, 2f, 1f));
-            keys.Add(new KeyCap(Keys.End, "End", 16.5f, 2f, 1f));
-            keys.Add(new KeyCap(Keys.PageDown, "Page Down", 17.5f, 2f, 1f));
+            keys.Add(new KeyCap(Keys.Delete, "Del", 15.25f, 2f, 1f));
+            keys.Add(new KeyCap(Keys.End, "End", 16.25f, 2f, 1f));
+            keys.Add(new KeyCap(Keys.PageDown, "Page Down", 17.25f, 2f, 1f));
             keys.Add(new KeyCap(Keys.NumPad7, "7", 18.5f, 2f, 1f));
             keys.Add(new KeyCap(Keys.NumPad8, "8", 19.5f, 2f, 1f));
             keys.Add(new KeyCap(Keys.NumPad9, "9", 20.5f, 2f, 1f));
@@ -167,7 +167,7 @@ namespace CapsLockLite
             rightShift.Modifier = KeyModifier.Shift;
             keys.Add(rightShift);
 
-            keys.Add(new KeyCap(Keys.Up, "↑", 16.5f, 4f, 1f));
+            keys.Add(new KeyCap(Keys.Up, "↑", 16.25f, 4f, 1f));
             keys.Add(new KeyCap(Keys.NumPad1, "1", 18.5f, 4f, 1f));
             keys.Add(new KeyCap(Keys.NumPad2, "2", 19.5f, 4f, 1f));
             keys.Add(new KeyCap(Keys.NumPad3, "3", 20.5f, 4f, 1f));
@@ -202,9 +202,9 @@ namespace CapsLockLite
             rightCtrl.Modifier = KeyModifier.Ctrl;
             keys.Add(rightCtrl);
 
-            keys.Add(new KeyCap(Keys.Left, "←", 15.5f, 5f, 1f));
-            keys.Add(new KeyCap(Keys.Down, "↓", 16.5f, 5f, 1f));
-            keys.Add(new KeyCap(Keys.Right, "→", 17.5f, 5f, 1f));
+            keys.Add(new KeyCap(Keys.Left, "←", 15.25f, 5f, 1f));
+            keys.Add(new KeyCap(Keys.Down, "↓", 16.25f, 5f, 1f));
+            keys.Add(new KeyCap(Keys.Right, "→", 17.25f, 5f, 1f));
             keys.Add(new KeyCap(Keys.NumPad0, "0", 18.5f, 5f, 2f));
             keys.Add(new KeyCap(Keys.Decimal, ".", 20.5f, 5f, 1f));
 
@@ -923,6 +923,20 @@ namespace CapsLockLite
         private Rectangle _dragDirty;
         private bool _dragDirtyValid;
         private PointF _dragGrab;
+        // Key of the mouse zone the pointer is over while dragging to the mouse
+        // card; -1 when the drop target is on the board itself. The key itself is
+        // kept separately: a mouse zone has no cap index, so the index alone used
+        // to throw the drop target away and the drop never happened.
+        private int _externalDrop = -1;
+        private Keys _externalDropKey = Keys.None;
+        // A card dragged from the mouse zone onto the board: the board draws the
+        // lifted card because a control cannot paint outside its own bounds.
+        private bool _externalDragActive;
+        private PointF[] _externalShape;
+        private string _externalAction = "";
+        private Rectangle _externalText = Rectangle.Empty;
+        private float _externalFontSize;
+        private Point _externalPoint;
 
         public event EventHandler SelectionChanged;
         public event EventHandler KeyActivated;
@@ -930,6 +944,16 @@ namespace CapsLockLite
         public event Action<KeyModifier> ModifierToggleRequested;
         /// <summary>Raised when a main key is dropped on another main key.</summary>
         public event Action<Keys, Keys> KeyDragDropped;
+        /// <summary>Raised when a main key is dropped on a mouse zone.</summary>
+        public event Action<Keys, Keys> KeyDragDroppedExternal;
+        /// <summary>Tells the page which zone the pointer is over (Keys.None = none).</summary>
+        public event Action<Keys> ExternalTargetChanged;
+        /// <summary>Raised on every drag move: the lifted card in screen space, the pointer and whether it left the board.</summary>
+        public event Action<DragGhostCard, Point, bool> DragPointerMoved;
+        /// <summary>Raised when a drag ends, so the other surface can drop its card.</summary>
+        public event Action DragFinished;
+        /// <summary>Screen point to the mouse zone under it; null when no pad exists.</summary>
+        public Func<Point, Keys> ExternalDropTarget;
 
         /// <summary>True while a key is following the pointer.</summary>
         internal bool IsDragging { get { return _dragActive; } }
@@ -1184,6 +1208,7 @@ namespace CapsLockLite
             EnsureLayouts();
             for (int i = 0; i < _caps.Count; i++) DrawKey(g, i);
             if (_dragActive) DrawDragOverlay(g);
+            if (_externalDragActive) DrawExternalDragCard(g);
         }
 
         /// <summary>Drop target ring, dimmed source cap and the lifted card under the pointer.</summary>
@@ -1207,10 +1232,20 @@ namespace CapsLockLite
             float sourceRadius = Math.Min(Theme.SF(4f), Math.Max(2f, source.Height * 0.18f));
             Theme.FillRound(g, source, sourceRadius, Theme.Alpha(Theme.Background, 170));
 
-            RectangleF ghost = DragGhostRect();
-            // The lifted card is the cap itself, not a wider panel: same face,
-            // same corner radius. Only the key symbol is dropped; the action line
-            // keeps the size and position it has on the board.
+            // When the card is dragged past the board edge it is clipped anyway;
+            // the surface under the pointer takes over the visual there.
+            if (!ClientRectangle.Contains(Point.Round(_dragRender))) return;
+
+            DrawGhostFace(g, DragGhostRect());
+        }
+
+        /// <summary>
+        /// The lifted cap itself, not a wider panel: same face, same corner radius.
+        /// Only the key symbol is dropped; the action line keeps the size and
+        /// position it has on the board.
+        /// </summary>
+        private void DrawGhostFace(Graphics g, RectangleF ghost)
+        {
             float ghostRadius = Math.Min(Theme.SF(4f), Math.Max(2f, ghost.Height * 0.18f));
 
             Theme.FillRound(g, new RectangleF(ghost.X + 1f, ghost.Y + 3f, ghost.Width, ghost.Height),
@@ -1226,17 +1261,62 @@ namespace CapsLockLite
         }
 
         /// <summary>
-        /// The lifted card is the source cap's face, unchanged in size and shape;
-        /// it follows the pointer with the grab offset taken inside that face.
+        /// The lifted card of one cap: its face plus the action line where the board
+        /// paints it. The key name is the only thing the card drops. The face is the
+        /// raw grab position — the surface showing the card clamps it to its own
+        /// edge, so the card stays under the pointer until an edge is reached.
         /// </summary>
-        private RectangleF DragGhostRect()
+        private DragGhostCard GhostCardFor(int index)
+        {
+            RectangleF face = DragGhostFace();
+            // The card is handed over in screen space; the surface that shows it
+            // converts back to its own client area.
+            Point origin = PointToScreen(Point.Empty);
+            RectangleF outer = new RectangleF(face.X + origin.X, face.Y + origin.Y,
+                face.Width, face.Height);
+            DragGhostCard card = new DragGhostCard();
+            card.Shape = new[]
+            {
+                new PointF(outer.Left, outer.Top), new PointF(outer.Right, outer.Top),
+                new PointF(outer.Right, outer.Bottom), new PointF(outer.Left, outer.Bottom)
+            };
+            KeyActionLayout layout = index >= 0 && index < _capLayouts.Length
+                ? _capLayouts[index] : null;
+            if (layout != null && layout.HasAction)
+            {
+                card.Action = layout.ActionText ?? "";
+                card.FontSize = layout.ActionFont == null ? 0f : layout.ActionFont.Size;
+                card.Text = KeyVisual.ActionRowRect(outer, layout);
+            }
+            return card;
+        }
+
+        /// <summary>Lifted card for a mouse zone dragged over the board.</summary>
+        private void DrawExternalDragCard(Graphics g)
+        {
+            if (_externalShape == null) return;
+            KeyVisual.DrawGhost(g, _externalShape, _externalAction, _externalText,
+                _externalFontSize);
+        }
+
+        /// <summary>
+        /// The lifted card is the source cap's face, unchanged in size and shape; it
+        /// follows the pointer with the grab offset taken inside that face. This is
+        /// the raw position: the surface painting it clamps it to its own edge.
+        /// </summary>
+        private RectangleF DragGhostFace()
         {
             RectangleF face = TopFace(_dragFrom);
-            float x = Math.Max(Theme.SF(2f), Math.Min(_dragRender.X - _dragGrab.X,
-                ClientSize.Width - face.Width - Theme.SF(2f)));
-            float y = Math.Max(Theme.SF(2f), Math.Min(_dragRender.Y - _dragGrab.Y,
-                ClientSize.Height - face.Height - Theme.SF(2f)));
-            return new RectangleF(x, y, face.Width, face.Height);
+            return new RectangleF(_dragRender.X - _dragGrab.X, _dragRender.Y - _dragGrab.Y,
+                face.Width, face.Height);
+        }
+
+        /// <summary>The face clamped to the board: the card never hangs over its edge.</summary>
+        private RectangleF DragGhostRect()
+        {
+            RectangleF face = DragGhostFace();
+            PointF topLeft = GhostPlacement.Clamp(face.Location, face.Size, ClientSize);
+            return new RectangleF(topLeft.X, topLeft.Y, face.Width, face.Height);
         }
 
         /// <summary>
@@ -1353,43 +1433,14 @@ namespace CapsLockLite
             bool hovered = index == _hover;
             bool selected = index == _selected;
 
-            Color faceColor = Theme.IsDark ? Theme.SurfaceAlt : Theme.Surface;
-            Color edgeColor = Theme.StrokeStrong;
-            Color textColor = Theme.IsDark ? Theme.TextPrimary : Theme.TextSecondary;
-
-            if (modifierOn)
-            {
-                // A selected modifier is a filter switch, not a bound key: keep the
-                // normal cap and put a diagonal mask on it instead of the solid
-                // accent fill used for keys that carry shortcuts.
-                edgeColor = Theme.Accent;
-                textColor = Theme.IsDark ? Theme.Accent : Theme.AccentPressed;
-            }
-            else if (enabledBound)
-            {
-                faceColor = Theme.IsDark ? Theme.Blend(Theme.Accent, Theme.SurfaceAlt, 0.72f) : Theme.AccentSoft;
-                edgeColor = Theme.Alpha(Theme.Accent, 190);
-                textColor = Theme.Accent;
-            }
-            else if (disabledOnly)
-            {
-                // The shortcut exists but cannot fire: muted cap + grey hatch, never
-                // the accent fill that would read as "active".
-                faceColor = Theme.IsDark ? Theme.SurfaceAlt : Theme.SurfaceAlt;
-                edgeColor = Theme.StrokeStrong;
-                textColor = Theme.TextSecondary;
-            }
-            else if (usedNeutral)
-            {
-                // Overview state: a light accent wash marks every key that carries
-                // shortcuts; the count badge carries the number, not the name.
-                faceColor = Theme.IsDark
-                    ? Theme.Blend(Theme.AccentSoft, Theme.SurfaceAlt, 0.80f)
-                    : Theme.Blend(Theme.AccentSoft, Theme.Surface, 0.55f);
-                edgeColor = Theme.Alpha(Theme.Accent, 90);
-            }
-            if (hovered)
-                faceColor = Theme.Blend(faceColor, Theme.IsDark ? Color.White : Color.Black, 0.06f);
+            // A selected modifier is a filter switch, not a bound key: it keeps the
+            // normal cap and gets a diagonal mask instead of the accent fill used
+            // for keys that carry shortcuts. All state colours come from KeyVisual
+            // so the mouse card paints exactly the same states.
+            Color faceColor = KeyVisual.FaceColor(modifierOn, enabledBound, disabledOnly,
+                usedNeutral, hovered);
+            Color edgeColor = KeyVisual.EdgeColor(modifierOn, enabledBound, disabledOnly, usedNeutral);
+            Color textColor = KeyVisual.TextColor(modifierOn, enabledBound, disabledOnly, usedNeutral);
 
             Color shadow = Theme.IsDark
                 ? Theme.Blend(faceColor, Color.Black, 0.55f)
@@ -1411,6 +1462,12 @@ namespace CapsLockLite
                 Theme.StrokeRound(g, new RectangleF(top.X + 1f, top.Y + 1f,
                     Math.Max(1f, top.Width - 2f), Math.Max(1f, top.Height - 2f)),
                     radius, Theme.TextPrimary, 1.6f);
+            }
+            if (index == _externalDrop)
+            {
+                Theme.StrokeRound(g, new RectangleF(top.X + 1f, top.Y + 1f,
+                    Math.Max(1f, top.Width - 2f), Math.Max(1f, top.Height - 2f)),
+                    radius, Theme.Accent, 2f);
             }
         }
 
@@ -1447,24 +1504,7 @@ namespace CapsLockLite
         private void DrawDisabledMask(Graphics g, RectangleF face, float radius)
         {
             using (GraphicsPath path = Theme.Rounded(face, radius))
-            {
-                Region previous = g.Clip;
-                try
-                {
-                    g.SetClip(path, CombineMode.Intersect);
-                    using (Pen pen = new Pen(Theme.Alpha(Theme.TextDisabled, 120), 1f))
-                    {
-                        float step = Math.Max(4f, _unit * 0.20f);
-                        for (float x = face.Left - face.Height; x < face.Right + face.Height; x += step)
-                            g.DrawLine(pen, x, face.Top, x + face.Height, face.Bottom);
-                    }
-                }
-                finally
-                {
-                    g.Clip = previous;
-                    previous.Dispose();
-                }
-            }
+                KeyVisual.Hatch(g, path, _unit);
         }
 
         /// <summary>
@@ -1477,24 +1517,7 @@ namespace CapsLockLite
         /// </summary>
         private void DrawCountBadge(Graphics g, RectangleF face, int count)
         {
-            if (_countFont == null || count <= 0 || _unit < 34f) return;
-
-            string text = count.ToString();
-            // Two-digit counts get the extra pixels they need and the badge stays a
-            // circle; single digits keep the compact size.
-            float textWidth = Theme.Measure(text, _countFont).Width;
-            float diameter = Math.Max(9f, Math.Max(_unit * 0.26f, textWidth + 4f));
-            float inset = Math.Max(1f, _unit * 0.04f);
-            // Every count sits in the same bottom-right corner, Space included: a
-            // consistent corner is easier to scan than one badge floating mid-bar.
-            RectangleF circle = new RectangleF(face.Right - diameter - inset,
-                face.Bottom - diameter - inset, diameter, diameter);
-            if (circle.X < face.X + 1f || circle.Y < face.Y + 1f) return;
-
-            Theme.FillRound(g, circle, diameter / 2f, Theme.Accent);
-            TextRenderer.DrawText(g, text, _countFont, Rectangle.Round(circle), Theme.OnAccent,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            KeyVisual.DrawBadge(g, face, count, _unit, _countFont);
         }
 
         private const TextFormatFlags KeyLabelFlags =
@@ -1522,25 +1545,7 @@ namespace CapsLockLite
                 DrawActionKey(g, cap, face, color, layout);
                 return;
             }
-            if (string.IsNullOrEmpty(cap.Label)) return;
-
-            int width = Math.Max(1, (int)face.Width + 2);
-            // Labels may spill 1 px into the gap on each side: the neighbour is
-            // further away than that and the alternative is a truncated word.
-            Rectangle bounds = new Rectangle((int)face.X - 1, (int)face.Y,
-                width, Math.Max(1, (int)face.Height));
-
-            KeyLabelPlan plan = KeyLabel.Plan(cap, width, face.Height,
-                _labelFont, _subFont, _tinyFont);
-
-            if (plan.Kind == KeyLabelKind.TwoLines)
-            {
-                DrawKeyLines(g, plan.First, plan.Second, face, color,
-                    plan.FirstFont, plan.SecondFont);
-                return;
-            }
-
-            TextRenderer.DrawText(g, cap.Label, plan.FirstFont, bounds, color, KeyLabelFlags);
+            KeyVisual.DrawLabel(g, cap.Label, face, color, _labelFont, _subFont, _tinyFont);
         }
 
         /// <summary>
@@ -1569,29 +1574,7 @@ namespace CapsLockLite
         private void DrawActionKey(Graphics g, KeyCap cap, RectangleF face, Color color,
             KeyActionLayout layout, bool hideSymbol)
         {
-            RectangleF top = face;
-            int width = Math.Max(1, (int)top.Width + 2);
-            int height = Math.Max(1, (int)top.Height);
-            int total = layout.Height;
-            int y = (int)Math.Round(top.Y + (height - total) / 2f);
-            if (y < top.Y + 1f) y = (int)top.Y + 1;
-            if (y + total > top.Y + height) y = (int)top.Y + height - total;
-
-            for (int i = 0; i < layout.RowText.Length; i++)
-            {
-                Rectangle row = new Rectangle((int)top.X - 1, y, width, layout.RowHeight[i]);
-                if (!hideSymbol)
-                {
-                    TextRenderer.DrawText(g, layout.RowText[i], layout.RowFont[i], row, color,
-                        KeyLineFlags);
-                }
-                y += layout.RowHeight[i];
-            }
-
-            Rectangle action = new Rectangle((int)top.X + 1, y,
-                Math.Max(1, (int)top.Width - 2), Math.Max(1, layout.ActionHeight));
-            TextRenderer.DrawText(g, layout.ActionText, layout.ActionFont, action,
-                Theme.Alpha(color, 205), ActionTextFlags);
+            KeyVisual.DrawActionLayout(g, face, layout, color, hideSymbol);
         }
 
         private void DrawKeyLines(Graphics g, string first, string second,
@@ -1648,7 +1631,17 @@ namespace CapsLockLite
                 // as lag, and the drag must feel like the cap is under the cursor.
                 _dragPoint = new PointF(e.X, e.Y);
                 _dragRender = _dragPoint;
-                _dragTo = DropTargetAt(e.Location);
+                bool inside = ClientRectangle.Contains(e.Location);
+                Keys external = Keys.None;
+                if (!inside && ExternalDropTarget != null)
+                    external = ExternalDropTarget(PointToScreen(e.Location));
+                SetExternalDrop(external);
+                _dragTo = external == Keys.None ? DropTargetAt(e.Location) : -1;
+                if (DragPointerMoved != null)
+                {
+                    Point screen = PointToScreen(e.Location);
+                    DragPointerMoved(GhostCardFor(_dragFrom), screen, !inside);
+                }
                 InvalidateDrag();
                 return;
             }
@@ -1690,9 +1683,11 @@ namespace CapsLockLite
                     if (handler != null) handler(cap.Modifier);
                     return;
                 }
-                // A used key inside a chord is draggable: press arms the drag and
-                // the click only fires on release when the pointer never moved.
-                if (HasSelection && _capCounts[index] > 0)
+                // Every main key lifts inside a chord, including one that carries
+                // nothing: an empty key must answer the press like any other cap
+                // instead of sitting there dead. Dropping it moves nothing, and a
+                // press without movement is still an ordinary click.
+                if (HasSelection)
                 {
                     ArmDrag(index, e.Location);
                     return;
@@ -1726,12 +1721,14 @@ namespace CapsLockLite
 
             int from = _dragFrom;
             int to = _dragTo;
+            Keys external = ExternalDropKey();
             bool moved = _dragActive;
             EndDrag();
 
             if (moved)
             {
-                if (to >= 0 && to != from) RaiseKeyDrag(from, to);
+                if (external != Keys.None) RaiseKeyDragExternal(from, external);
+                else if (to >= 0 && to != from) RaiseKeyDrag(from, to);
                 // A finished drag is not a click: the next press starts a fresh
                 // pair instead of completing one with the pre-drag press.
                 _lastClickIndex = -1;
@@ -1751,8 +1748,10 @@ namespace CapsLockLite
             if (!_dragActive || Capture) return;
             int from = _dragFrom;
             int to = _dragTo;
+            Keys external = ExternalDropKey();
             EndDrag();
-            if (to >= 0 && to != from) RaiseKeyDrag(from, to);
+            if (external != Keys.None) RaiseKeyDragExternal(from, external);
+            else if (to >= 0 && to != from) RaiseKeyDrag(from, to);
             _lastClickIndex = -1;
             _lastClickTick = 0;
         }
@@ -1793,6 +1792,10 @@ namespace CapsLockLite
                 return;
             }
             Rectangle now = DragDirtyBounds();
+            // While the card is being drawn by the other surface nothing on the
+            // board changes between two moves: repainting the same band again would
+            // only cost frame time.
+            if (_dragDirtyValid && now == _dragDirty) return;
             Rectangle band = _dragDirtyValid ? Rectangle.Union(_dragDirty, now) : now;
             band.Inflate(4, 4);
             if (band.Width > 0 && band.Height > 0) Invalidate(band);
@@ -1809,13 +1812,147 @@ namespace CapsLockLite
                 band = band.IsEmpty
                     ? Rectangle.Round(_rects[_dragTo])
                     : Rectangle.Union(band, Rectangle.Round(_rects[_dragTo]));
-            if (_dragFrom >= 0 && _dragFrom < _rects.Length)
+            // Past the edge the other surface paints the card, so this one has
+            // nothing to erase there; including a clamped ghost rect would repaint
+            // a wide band of the board on every move.
+            if (_dragFrom >= 0 && _dragFrom < _rects.Length
+                && ClientRectangle.Contains(Point.Round(_dragRender)))
             {
                 Rectangle ghost = Rectangle.Round(DragGhostRect());
                 ghost.Inflate(4, 6);
                 band = band.IsEmpty ? ghost : Rectangle.Union(band, ghost);
             }
             return band;
+        }
+
+        /// <summary>
+        /// Draws the lifted card while a mouse zone is dragged over the board. The
+        /// page forwards the card's drag here so both directions look the same.
+        /// </summary>
+        internal void SetExternalDrag(DragGhostCard card, Point screen, bool outside)
+        {
+            PointF[] shapeScreen = card == null ? null : card.Shape;
+            bool over = shapeScreen != null && shapeScreen.Length >= 3 && !screen.IsEmpty;
+            Point local = screen.IsEmpty ? Point.Empty : PointToClient(screen);
+            bool active = over && ClientRectangle.Contains(local);
+            if (!active)
+            {
+                // Nothing of this card is on the board: a drag somewhere else must
+                // not cost the board a full repaint on every mouse move.
+                if (!_externalDragActive && _externalShape == null) return;
+                ClearExternalDrag();
+                return;
+            }
+
+            Rectangle before = _externalShape == null ? Rectangle.Empty : BandOf(_externalShape);
+            _externalDragActive = true;
+            _externalAction = card.Action ?? "";
+            _externalFontSize = card.FontSize;
+            _externalPoint = local;
+            Point origin = PointToScreen(Point.Empty);
+            _externalShape = new PointF[shapeScreen.Length];
+            for (int i = 0; i < shapeScreen.Length; i++)
+                _externalShape[i] = new PointF(shapeScreen[i].X - origin.X,
+                    shapeScreen[i].Y - origin.Y);
+            // The action line travels with the card, in the same coordinates.
+            _externalText = card.Text.Width > 0 && card.Text.Height > 0
+                ? new Rectangle(card.Text.X - origin.X, card.Text.Y - origin.Y,
+                    card.Text.Width, card.Text.Height)
+                : Rectangle.Empty;
+
+            // The board keeps the card whole, the same rule it applies to its own
+            // caps: a zone handed over from the card arrives clamped at this edge
+            // rather than half outside the board.
+            Point shift = GhostPlacement.ClampOffset(KeyVisual.GhostBounds(_externalShape),
+                ClientSize);
+            if (shift.X != 0 || shift.Y != 0)
+            {
+                for (int i = 0; i < _externalShape.Length; i++)
+                    _externalShape[i] = new PointF(_externalShape[i].X + shift.X,
+                        _externalShape[i].Y + shift.Y);
+                if (_externalText.Width > 0) _externalText.Offset(shift.X, shift.Y);
+            }
+
+            // Repaint only where the card was and where it is now: the board is a
+            // large custom-painted surface and a drag card moves every few pixels.
+            Rectangle after = BandOf(_externalShape);
+            Rectangle band = before.IsEmpty ? after : (after.IsEmpty ? before
+                : Rectangle.Union(before, after));
+            if (band.Width > 0 && band.Height > 0) Invalidate(band);
+            else Invalidate();
+        }
+
+        /// <summary>Drops the card the mouse card handed over, at once.</summary>
+        private void ClearExternalDrag()
+        {
+            if (!_externalDragActive && _externalShape == null) return;
+            Rectangle band = _externalShape == null ? Rectangle.Empty : BandOf(_externalShape);
+            _externalDragActive = false;
+            _externalShape = null;
+            _externalAction = "";
+            _externalText = Rectangle.Empty;
+            _externalFontSize = 0f;
+            if (band.Width > 0 && band.Height > 0) Invalidate(band);
+            else Invalidate();
+        }
+
+        /// <summary>Screen-unrelated bounding band of a lifted card, in client space.</summary>
+        private static Rectangle BandOf(PointF[] points)
+        {
+            if (points == null || points.Length == 0) return Rectangle.Empty;
+            float minX = points[0].X, maxX = points[0].X, minY = points[0].Y, maxY = points[0].Y;
+            for (int i = 1; i < points.Length; i++)
+            {
+                if (points[i].X < minX) minX = points[i].X;
+                if (points[i].X > maxX) maxX = points[i].X;
+                if (points[i].Y < minY) minY = points[i].Y;
+                if (points[i].Y > maxY) maxY = points[i].Y;
+            }
+            RectangleF bounds = new RectangleF(minX, minY, Math.Max(1f, maxX - minX),
+                Math.Max(1f, maxY - minY));
+            bounds.Inflate(4f, 8f);
+            return Rectangle.Round(bounds);
+        }
+
+        /// <summary>Highlights the key a mouse-zone drag is currently over.</summary>
+        internal void SetExternalDropKey(Keys key)
+        {
+            int index = key == Keys.None ? -1 : IndexOfKey(key);
+            if (index == _externalDrop) return;
+            int before = _externalDrop;
+            _externalDrop = index;
+            InvalidateCaps(before, index);
+        }
+
+        /// <summary>Repaints only the two caps a highlight moves between.</summary>
+        private void InvalidateCaps(int from, int to)
+        {
+            Rectangle band = Rectangle.Empty;
+            if (from >= 0 && from < _rects.Length) band = Rectangle.Round(_rects[from]);
+            if (to >= 0 && to < _rects.Length)
+            {
+                Rectangle next = Rectangle.Round(_rects[to]);
+                band = band.IsEmpty ? next : Rectangle.Union(band, next);
+            }
+            if (band.Width > 0 && band.Height > 0)
+            {
+                band.Inflate(4, 6);
+                Invalidate(band);
+            }
+        }
+
+        /// <summary>Screen point to main key; used by the mouse card while dragging.</summary>
+        internal Keys KeyAtScreen(Point screen)
+        {
+            if (!Visible) return Keys.None;
+            Point local = PointToClient(screen);
+            if (!ClientRectangle.Contains(local)) return Keys.None;
+            // The collapsed board keeps its full height inside a clipped host, so
+            // a point in the clipped part must not resolve to a key.
+            if (Parent != null && local.Y >= Parent.ClientSize.Height) return Keys.None;
+            int index = IndexAt(local);
+            if (index < 0 || _caps[index].Modifier != KeyModifier.None) return Keys.None;
+            return _caps[index].Code;
         }
 
         /// <summary>Aborts a drag without moving anything (Esc at the form level).</summary>
@@ -1827,6 +1964,7 @@ namespace CapsLockLite
         private void EndDrag()
         {
             Rectangle band = _dragDirtyValid ? _dragDirty : Rectangle.Empty;
+            SetExternalDrop(Keys.None);
             _dragArmed = false;
             _dragActive = false;
             _dragFrom = -1;
@@ -1834,6 +1972,7 @@ namespace CapsLockLite
             _dragDirtyValid = false;
             if (Capture) Capture = false;
             Cursor = Cursors.Default;
+            if (DragFinished != null) DragFinished();
             if (band.Width > 0 && band.Height > 0)
             {
                 band.Inflate(6, 8);
@@ -1852,6 +1991,35 @@ namespace CapsLockLite
             if (index < 0 || index == _dragFrom) return -1;
             if (_caps[index].Modifier != KeyModifier.None) return -1;
             return index;
+        }
+
+        private Keys ExternalDropKey()
+        {
+            return _externalDropKey;
+        }
+
+        /// <summary>
+        /// Records the drop target that lives outside the board (a mouse zone). The
+        /// key is kept as a key, not as a cap index: IndexOfKey finds nothing for a
+        /// mouse zone, and mapping it to -1 silently dropped the target.
+        /// </summary>
+        private void SetExternalDrop(Keys key)
+        {
+            if (key == _externalDropKey) return;
+            int before = _externalDrop;
+            _externalDropKey = key;
+            _externalDrop = key == Keys.None ? -1 : IndexOfKey(key);
+            if (ExternalTargetChanged != null) ExternalTargetChanged(key);
+            // A mouse zone has no cap on the board, so nothing here changes and the
+            // board must not repaint at all (the card draws its own ring).
+            InvalidateCaps(before, _externalDrop);
+        }
+
+        private void RaiseKeyDragExternal(int from, Keys target)
+        {
+            if (from < 0 || target == Keys.None) return;
+            Action<Keys, Keys> handler = KeyDragDroppedExternal;
+            if (handler != null) handler(_caps[from].Code, target);
         }
 
         private void RaiseKeyDrag(int from, int to)
@@ -1978,6 +2146,12 @@ namespace CapsLockLite
         {
             int index = IndexOfKey(key);
             if (index >= 0) ArmDrag(index, new Point(0, 0));
+        }
+
+        /// <summary>Harness hook: the card the mouse card handed over, in client space.</summary>
+        internal RectangleF ExternalGhostForTest()
+        {
+            return _externalShape == null ? RectangleF.Empty : KeyVisual.GhostBounds(_externalShape);
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)

@@ -308,7 +308,8 @@ namespace CapsLockLite
             if (settings.ConfigVersion < 2) MigrateToVersion2(settings);
             settings.ConfigVersion = 6;
             if (settings.TapAction == null) settings.TapAction = "caps";
-            if (settings.TapAction != "caps" && settings.TapAction != "esc" && settings.TapAction != "none")
+            if (settings.TapAction != "caps" && settings.TapAction != "esc"
+                && settings.TapAction != "none" && settings.TapAction != "ime")
                 settings.TapAction = "caps";
             if (settings.LongPressMs < 150) settings.LongPressMs = 150;
             if (settings.LongPressMs > 2000) settings.LongPressMs = 2000;
@@ -379,7 +380,10 @@ namespace CapsLockLite
                 if (!def.Missing)
                 {
                     m.Param = ActionCatalog.NormalizeParam(m.Action, m.Param);
-                    if (!ActionCatalog.IsRepeatable(m.Action))
+                    // A wheel notch has no key-up, so a hand-edited "hold" on a
+                    // wheel trigger can never repeat; the editor already locks
+                    // this, normalize external files the same way.
+                    if (!ActionCatalog.IsRepeatable(m.Action) || MouseKeys.IsWheel((Keys)m.Key))
                         m.TriggerMode = "once";
                     else if (m.TriggerMode != "hold" && m.TriggerMode != "once")
                         m.TriggerMode = "hold";

@@ -98,6 +98,9 @@ namespace CapsLockLite
 
             _pluginListCard = new MCard();
             _pluginListCard.Padding = new Padding(1);
+            // Square corners: the list is full-bleed, so a rounded card would show a
+            // mismatched corner ring at all four corners (same as the shortcut list).
+            _pluginListCard.Radius = 0;
             page.Controls.Add(_pluginListCard);
 
             _pluginList = new MListView();

@@ -1,5 +1,5 @@
-param(
-    [string]$Version = 'v1.21.4',
+﻿param(
+    [string]$Version = 'v1.25.2',
     [string]$Suffix = '',
     [switch]$SkipBuild,
     [string]$OutputDir = 'dist'

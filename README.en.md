@@ -8,7 +8,7 @@
 
 A lightweight Caps Lock enhancement tool for Windows, inspired by [Capslock+](https://capslox.com/capslock-plus/). Tap **Caps Lock** to toggle caps as usual; hold it and press other keys to move the cursor, select text, delete, copy and paste. Everything is configurable from a graphical UI.
 
-Version **1.21.4**. This is an independent implementation, **not an official Capslock+ release**. It does not include Qbar, WinBind or TabScript.
+Version **1.25.2**. This is an independent implementation, **not an official Capslock+ release**. It does not include Qbar, WinBind or TabScript.
 
 ![Shortcuts page](docs/images/shortcut-page.png)
 
@@ -19,6 +19,8 @@ Version **1.21.4**. This is an independent implementation, **not an official Cap
 - **Familiar default keys** — arrows, selection, deletion, line start/end, clipboard and calculator, based on the classic Capslock+ layout.
 - **Keyboard as UI** — the shortcuts page renders a full 104-key keyboard. Click a modifier to filter, click a key to filter the list, drag a key to move its bindings, double-click to edit.
 - **Custom combinations** — `Caps + key` or `Caps + Ctrl/Alt/Shift/Win + key`. No system-wide hotkeys are registered, so CapsLock Lite does not fight other programs for key combinations.
+- **Mouse as a main key** — `Caps + left / right / middle click` and `Caps + wheel up / down` can run any action. Mouse buttons support hold-to-repeat like keys; a wheel notch has no release, so it fires once per notch.
+- **Mouse card** — the shortcuts page draws a mouse with five zones next to the list. Zones filter, double-click to edit and open the same right-click menu as keycaps, and shortcuts can be dragged between the board and the mouse in both directions.
 - **Per-program presets** — bind another shortcut table to a process; it switches automatically when that program is in the foreground.
 - **Macros** — chain built-in actions, plugin actions and other macros with per-step delay and repeat count.
 - **Plugins** — add actions with a single C# file. Plugins are only compiled and executed after you explicitly trust their SHA-256; trust is revoked automatically when the file changes.
@@ -28,7 +30,7 @@ Version **1.21.4**. This is an independent implementation, **not an official Cap
 
 ## Install
 
-1. Download `CapsLockLite-v1.21.4-win64.zip` from [Releases](https://github.com/jiekemt/CapsLockLite/releases/latest).
+1. Download `CapsLockLite-v1.25.2-win64.zip` from [Releases](https://github.com/jiekemt/CapsLockLite/releases/latest).
 2. Extract and run `CapsLockLite.exe`. It is a single portable executable; no installer is required.
 3. Verify the download against `CapsLockLite-SHA256.txt` in the package if you like.
 4. If the original Capslock+ is also running, quit it first so only one program captures Caps Lock.
@@ -51,6 +53,14 @@ All combinations are prefixed with Caps Lock. A short sample:
 | `F9 / F10 / F11` | Mute / volume down / up |
 
 The full list, including selection, deletion, window and media actions, is documented in the [Chinese README](README.md#默认键位).
+
+## Custom shortcuts
+
+Open the **Shortcuts** page and click **Add**. Pick the modifier chips (`Caps Lock`, `Ctrl`, `Alt`, `Shift`, `Win`), click the **main key** box and press the key you want. `Caps Lock` must stay checked: the app only supports the Caps layer and never registers a system-wide hotkey.
+
+The main key can also be a mouse button — **left, right, middle** — or the **wheel (up / down)**. Click the box once to start recording, then press the key or the mouse button; the recording swallows that single input so it cannot click anything else in the dialog. Recording ends after one capture, so the dialog buttons work normally again; click the box again to re-record. Mouse buttons support hold-to-repeat. A wheel notch has no release event, so wheel shortcuts are always single-shot and the trigger mode is locked to **press to fire**.
+
+Shortcuts can be dragged between the keyboard and the mouse card: with a chord selected, drag a cap onto a mouse zone or a zone onto a cap; the target highlights and releasing moves every shortcut on that chord. Conflicting targets ask before overwriting.
 
 ## Build from source
 
@@ -86,7 +96,7 @@ The plugin contract and samples are documented in [PLUGIN.md](PLUGIN.md) (Chines
 ## Known limitations
 
 - No Qbar / WinBind / TabScript / online translation API.
-- Some games, anti-cheat, remote desktop and security software may block low-level keyboard hooks.
+- Some games, anti-cheat, remote desktop and security software may block low-level keyboard or mouse hooks; mouse triggers stop working if the mouse hook is refused.
 - Programs running as administrator usually do not receive simulated input from a non-elevated process; run CapsLock Lite as administrator if needed.
 - `F3` sends `Ctrl+C` before opening Bing Translator — avoid it in terminals.
 - The binary is unsigned; see [SECURITY.md](SECURITY.md) for the threat model.

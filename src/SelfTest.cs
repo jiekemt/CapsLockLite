@@ -51,12 +51,18 @@ namespace CapsLockLite
                 TestRepeat();
                 TestCapsOnly();
                 TestKeyText();
+                TestMouseTriggers();
+                TestMouseKeySend();
+                TestMousePad();
+                TestGhostPlacement();
                 TestKeyboard();
                 TestKeyboardLabels();
                 TestKeyboardActions();
                 TestPopupMenu();
                 TestListInteraction();
                 TestListSelection();
+                TestTriggerChip();
+                TestActionRowPlacement();
                 TestReorderMath();
                 TestMacros();
                 TestKeySendMigration();
@@ -66,6 +72,7 @@ namespace CapsLockLite
                 TestConflicts();
                 TestPresets();
                 TestPlugins();
+                TestPluginParamChoices();
                 TestPluginTrust();
                 TestPluginPackages();
                 TestPluginSettings();
@@ -151,6 +158,16 @@ namespace CapsLockLite
             Check("config export/import action", restored.Mappings.Count > 0 && restored.Mappings[0].Action == original.Mappings[0].Action, "");
             try { File.Delete(path); }
             catch { }
+
+            // Short-press behaviour: the input-method tap is a valid setting, and an
+            // unknown value still falls back to the caps toggle.
+            AppSettings tap = ConfigStore.CreateDefault();
+            tap.TapAction = "ime";
+            ConfigStore.Normalize(tap);
+            Check("tap action accepts the input method", tap.TapAction == "ime", tap.TapAction);
+            tap.TapAction = "bogus";
+            ConfigStore.Normalize(tap);
+            Check("tap action falls back on unknown values", tap.TapAction == "caps", tap.TapAction);
         }
 
         /// <summary>
@@ -443,10 +460,342 @@ namespace CapsLockLite
             Check("numpad names parse in every spelling", numpadNames, "");
         }
 
+        /// <summary>
+        /// Mouse triggers ride on KeyMapping.Key with pseudo codes outside the
+        /// virtual-key range. The checks cover the key text, the configuration
+        /// round-trip, the Caps-layer routing and the capture box.
+        /// </summary>
+        private static void TestMouseTriggers()
+        {
+            HashSet<Keys> codes = new HashSet<Keys>(MouseKeys.All);
+            bool outsideKeyboardRange = true;
+            for (int i = 0; i < MouseKeys.All.Length; i++)
+            {
+                if ((int)MouseKeys.All[i] <= 0xFF) outsideKeyboardRange = false;
+                if (!MouseKeys.IsMouseKey(MouseKeys.All[i])) outsideKeyboardRange = false;
+            }
+            Check("mouse trigger codes are distinct pseudo keys",
+                codes.Count == 5 && outsideKeyboardRange, "count=" + codes.Count);
+
+            bool wheelOnly = MouseKeys.IsWheel((Keys)MouseKeys.WheelUp)
+                && MouseKeys.IsWheel((Keys)MouseKeys.WheelDown)
+                && !MouseKeys.IsWheel((Keys)MouseKeys.Left)
+                && !MouseKeys.IsWheel((Keys)MouseKeys.Middle);
+            Check("only the wheel codes are notches", wheelOnly, "");
+
+            bool names = KeyText.FormatKey((Keys)MouseKeys.Left) == "鼠标左键"
+                && KeyText.FormatKey((Keys)MouseKeys.Right) == "鼠标右键"
+                && KeyText.FormatKey((Keys)MouseKeys.Middle) == "鼠标中键"
+                && KeyText.FormatKey((Keys)MouseKeys.WheelUp) == "滚轮上滑"
+                && KeyText.FormatKey((Keys)MouseKeys.WheelDown) == "滚轮下滑";
+            Check("mouse trigger names", names, KeyText.FormatKey((Keys)MouseKeys.Left));
+
+            KeyMapping mouseLeft = new KeyMapping();
+            mouseLeft.Caps = true;
+            mouseLeft.KeyCode = (Keys)MouseKeys.Left;
+            mouseLeft.Action = "select.up";
+            mouseLeft.Param = "1";
+            Check("mouse trigger text", mouseLeft.TriggerText == "Caps + 鼠标左键",
+                mouseLeft.TriggerText);
+
+            // A wheel trigger has no key-up, so even a hand-edited "hold" has to
+            // be normalized back to a single shot.
+            AppSettings settings = new AppSettings();
+            settings.Mappings = new List<KeyMapping>();
+            KeyMapping wheelUp = new KeyMapping();
+            wheelUp.Caps = true;
+            wheelUp.KeyCode = (Keys)MouseKeys.WheelUp;
+            wheelUp.Action = "select.up";
+            wheelUp.Param = "1";
+            wheelUp.TriggerMode = "hold";
+            settings.Mappings.Add(wheelUp);
+            settings.Mappings.Add(mouseLeft.Clone());
+            ConfigStore.Normalize(settings);
+            Check("wheel trigger is normalized to a single shot",
+                settings.Mappings[0].TriggerMode == "once"
+                    && settings.Mappings[0].Key == MouseKeys.WheelUp, settings.Mappings[0].TriggerMode);
+
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest-mouse.json");
+            ConfigStore.Export(settings, path);
+            AppSettings restored = ConfigStore.Import(path);
+            Check("mouse trigger survives a config round-trip",
+                restored.Mappings.Count == 2
+                    && restored.Mappings[0].Key == MouseKeys.WheelUp
+                    && restored.Mappings[1].Key == MouseKeys.Left
+                    && restored.Mappings[1].TriggerText == "Caps + 鼠标左键",
+                restored.Mappings.Count + " mappings");
+            try { File.Delete(path); }
+            catch { }
+
+            // Caps layer routing: a bound mouse button fires and is swallowed, an
+            // unbound one passes through, and nothing happens outside the layer.
+            using (HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero))
+            {
+                int fired = 0;
+                manager.ActionTriggered += delegate { fired++; };
+                MethodInfo keyHook = typeof(HotkeyManager).GetMethod("OnHookKey",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                MethodInfo mouseHook = typeof(HotkeyManager).GetMethod("OnHookMouse",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                keyHook.Invoke(manager, new object[]
+                    { new KeyboardEventArgs(Keys.CapsLock, true, false, false, 0) });
+                bool down = (bool)mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.Left, true, false, false, false, 0) });
+                bool up = (bool)mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.Left, false, true, false, false, 0) });
+                bool unbound = (bool)mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.Right, true, false, false, false, 0) });
+                keyHook.Invoke(manager, new object[]
+                    { new KeyboardEventArgs(Keys.CapsLock, false, true, false, 0) });
+                bool outside = (bool)mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.Left, true, false, false, false, 0) });
+                Check("Caps + mouse button fires once and is swallowed",
+                    fired == 1 && down && up, "fired=" + fired);
+                Check("unbound mouse button passes through", !unbound, "");
+                Check("mouse trigger outside the Caps layer passes through", !outside, "");
+            }
+
+            // The wheel accumulates small deltas into a whole 120 notch, and the
+            // unbound direction keeps scrolling.
+            AppSettings wheelSettings = new AppSettings();
+            wheelSettings.Mappings = new List<KeyMapping>();
+            wheelSettings.Mappings.Add(wheelUp.Clone());
+            using (HotkeyManager manager = new HotkeyManager(wheelSettings, IntPtr.Zero))
+            {
+                int fired = 0;
+                manager.ActionTriggered += delegate { fired++; };
+                MethodInfo keyHook = typeof(HotkeyManager).GetMethod("OnHookKey",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                MethodInfo mouseHook = typeof(HotkeyManager).GetMethod("OnHookMouse",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                keyHook.Invoke(manager, new object[]
+                    { new KeyboardEventArgs(Keys.CapsLock, true, false, false, 0) });
+                bool half = (bool)mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.WheelUp, true, false, true, false, 60) });
+                int afterHalf = fired;
+                bool whole = (bool)mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.WheelUp, true, false, true, false, 60) });
+                int afterWhole = fired;
+                bool otherDirection = (bool)mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.WheelDown, true, false, true, false, 120) });
+                keyHook.Invoke(manager, new object[]
+                    { new KeyboardEventArgs(Keys.CapsLock, false, true, false, 0) });
+                Check("wheel fires once per 120 units",
+                    half && whole && afterHalf == 0 && afterWhole == 1,
+                    "afterHalf=" + afterHalf + " afterWhole=" + afterWhole);
+                Check("unbound wheel direction passes through", !otherDirection, "");
+            }
+
+            using (MKeyCapture capture = new MKeyCapture())
+            {
+                capture.AllowMouse = true;
+                bool capturedRight = capture.CaptureMouseForTest(
+                    new MouseButtonEventArgs((Keys)MouseKeys.Right, true, false, false, false, 0));
+                Keys afterRight = capture.KeyCode;
+                bool injected = capture.CaptureMouseForTest(
+                    new MouseButtonEventArgs((Keys)MouseKeys.Middle, true, false, false, true, 0));
+                bool wheelCaptured = capture.CaptureMouseForTest(
+                    new MouseButtonEventArgs((Keys)MouseKeys.WheelDown, true, false, true, false, -120));
+                Check("capture box records a mouse button",
+                    capturedRight && afterRight == (Keys)MouseKeys.Right, afterRight.ToString());
+                Check("capture box ignores injected and release events", !injected, "");
+                Check("capture box records a wheel notch",
+                    wheelCaptured && capture.KeyCode == (Keys)MouseKeys.WheelDown,
+                    capture.KeyCode.ToString());
+
+                // Recording a keyboard key must disarm the mouse recording, or the
+                // next click on "保存" would be captured instead of saving.
+                capture.CaptureKeyForTest(Keys.E);
+                bool disarmed = !capture.MouseArmedForTest;
+                bool keyboardKept = capture.KeyCode == Keys.E;
+                Check("keyboard capture disarms the mouse recording",
+                    disarmed && keyboardKept, capture.KeyCode.ToString());
+            }
+
+            using (MKeyCapture keyboardOnly = new MKeyCapture())
+            {
+                bool ignored = keyboardOnly.CaptureMouseForTest(
+                    new MouseButtonEventArgs((Keys)MouseKeys.Left, true, false, false, false, 0));
+                Check("capture box without mouse support stays keyboard-only",
+                    !ignored && keyboardOnly.KeyCode == Keys.None, "");
+            }
+        }
+
+        /// <summary>
+        /// The five mouse keys are legal "发送按键" keys now: the label parses back,
+        /// a combination with modifiers parses, the row shows the mouse key, and the
+        /// editor's key box is allowed to record a button.
+        /// </summary>
+        private static void TestMouseKeySend()
+        {
+            bool roundTrip = true;
+            string detail = "";
+            for (int i = 0; i < MouseKeys.All.Length; i++)
+            {
+                string text = KeyText.FormatKey(MouseKeys.All[i]);
+                if (KeyText.ParseKeyName(text) != MouseKeys.All[i])
+                {
+                    roundTrip = false;
+                    detail = text;
+                    break;
+                }
+            }
+            Check("mouse key labels parse back as send keys", roundTrip, detail);
+
+            bool aliases = KeyText.ParseKeyName("MouseLeft") == (Keys)MouseKeys.Left
+                && KeyText.ParseKeyName("wheel down") == (Keys)MouseKeys.WheelDown
+                && KeyText.ParseKeyName("鼠标右键") == (Keys)MouseKeys.Right;
+            Check("mouse key aliases parse", aliases, "");
+
+            bool ctrl, alt, shift, win;
+            Keys key;
+            bool combo = KeyText.TryParseCombo("Ctrl + 鼠标左键", out ctrl, out alt, out shift,
+                out win, out key);
+            Check("a send combo can be a mouse button",
+                combo && ctrl && !alt && !shift && !win && key == (Keys)MouseKeys.Left,
+                ctrl + " " + key);
+
+            bool wheel = KeyText.TryParseCombo("Shift + 滚轮下滑", out ctrl, out alt, out shift,
+                out win, out key);
+            Check("a send combo can be a wheel notch",
+                wheel && shift && key == (Keys)MouseKeys.WheelDown, shift + " " + key);
+
+            Check("mouse send row shows the mouse key",
+                ActionCatalog.Describe("input.keys", "鼠标中键") == "鼠标中键"
+                    && ActionCatalog.NormalizeParam("input.keys", "鼠标中键") == "鼠标中键",
+                ActionCatalog.Describe("input.keys", "鼠标中键"));
+
+            using (MKeyComboField field = new MKeyComboField())
+            {
+                field.ComboText = "Ctrl + 鼠标中键";
+                Check("combo field keeps a mouse key and records mouse keys",
+                    field.KeyCode == (Keys)MouseKeys.Middle && field.RecordsMouse,
+                    field.KeyCode + " / " + field.ComboText);
+            }
+
+            // The executor turns the pseudo code into a real mouse_event flag: the
+            // button goes down/up and a notch carries its delta instead of a flag.
+            bool flags = ActionExecutor.MouseButtonFlag(MouseKeys.All[0], false) == Native.MOUSEEVENTF_LEFTDOWN
+                && ActionExecutor.MouseButtonFlag(MouseKeys.All[0], true) == Native.MOUSEEVENTF_LEFTUP
+                && ActionExecutor.MouseButtonFlag(MouseKeys.All[1], false) == Native.MOUSEEVENTF_RIGHTDOWN
+                && ActionExecutor.MouseButtonFlag(MouseKeys.All[1], true) == Native.MOUSEEVENTF_RIGHTUP
+                && ActionExecutor.MouseButtonFlag(MouseKeys.All[2], false) == Native.MOUSEEVENTF_MIDDLEDOWN
+                && ActionExecutor.MouseButtonFlag(MouseKeys.All[2], true) == Native.MOUSEEVENTF_MIDDLEUP
+                && ActionExecutor.MouseButtonFlag(MouseKeys.All[3], false) == 0;
+            Check("mouse send maps to mouse_event flags", flags, "");
+
+            bool wheels = ActionExecutor.MouseWheelDelta(MouseKeys.All[3]) == 120
+                && ActionExecutor.MouseWheelDelta(MouseKeys.All[4]) == -120
+                && ActionExecutor.MouseWheelDelta(MouseKeys.All[0]) == 0;
+            Check("mouse send maps a notch to its wheel delta", wheels, "");
+        }
+
+        /// <summary>
+        /// The mouse card must hit-test the five zones and nothing else: the frame
+        /// margin and the footer stay unclickable.
+        /// </summary>
+        private static void TestMousePad()
+        {
+            using (MMousePad pad = new MMousePad())
+            {
+                pad.SetBounds(0, 0, Theme.S(200), Theme.S(300));
+
+                Keys[] zones =
+                {
+                    (Keys)MouseKeys.Left, (Keys)MouseKeys.Right, (Keys)MouseKeys.Middle,
+                    (Keys)MouseKeys.WheelUp, (Keys)MouseKeys.WheelDown
+                };
+                bool hitAll = true;
+                string detail = "";
+                for (int i = 0; i < zones.Length; i++)
+                {
+                    RectangleF bounds = pad.ZoneBoundsForTest(zones[i]);
+                    if (bounds.Width <= 0f || bounds.Height <= 0f)
+                    {
+                        hitAll = false;
+                        detail = zones[i] + " has no bounds";
+                        break;
+                    }
+                    Point center = new Point((int)(bounds.X + bounds.Width / 2f),
+                        (int)(bounds.Y + bounds.Height / 2f));
+                    Keys hit = pad.HitTestForTest(center);
+                    if (hit != zones[i])
+                    {
+                        hitAll = false;
+                        detail = zones[i] + " -> " + hit;
+                        break;
+                    }
+                }
+                Check("mouse card hit-tests all five zones", hitAll, detail);
+
+                RectangleF left = pad.ZoneBoundsForTest((Keys)MouseKeys.Left);
+                Keys margin = pad.HitTestForTest(new Point(
+                    (int)left.X - Theme.S(1), (int)(left.Y + left.Height / 2f)));
+                Check("mouse frame margin is not a hit zone", margin == Keys.None, margin.ToString());
+
+                Keys footer = pad.HitTestForTest(new Point(
+                    pad.Width / 2, pad.Height - Theme.S(4)));
+                Check("mouse card footer is not a hit zone", footer == Keys.None, footer.ToString());
+
+                // The five keys are keycaps: same gap on each side of a cell, same
+                // 3D depth, so horizontal and vertical spacing match the board above.
+                RectangleF leftZone = pad.ZoneBoundsForTest((Keys)MouseKeys.Left);
+                RectangleF rightZone = pad.ZoneBoundsForTest((Keys)MouseKeys.Right);
+                RectangleF wheel = pad.ZoneBoundsForTest((Keys)MouseKeys.Middle);
+                float gap = pad.GapForTest;
+                float horizontal = Math.Min(wheel.Left - leftZone.Right, rightZone.Left - wheel.Right);
+                Check("mouse seams use the board's key gap",
+                    Math.Abs(horizontal - gap * 2f) <= 1.5f,
+                    horizontal.ToString("0.0") + " vs " + (gap * 2f).ToString("0.0"));
+
+                RectangleF wheelUp = pad.ZoneBoundsForTest((Keys)MouseKeys.WheelUp);
+                float vertical = wheel.Top - wheelUp.Bottom;
+                float expected = gap * 2f + pad.DepthForTest((Keys)MouseKeys.WheelUp);
+                Check("mouse rows use the board's gap plus 3D depth",
+                    Math.Abs(vertical - expected) <= 1.5f,
+                    vertical.ToString("0.0") + " vs " + expected.ToString("0.0"));
+
+                // The frame keeps the same distance to a mouse key as two keyboard
+                // keys keep to each other, so one spacing rule covers the whole card.
+                RectangleF frame = pad.FrameBoundsForTest();
+                float frameMargin = leftZone.Left - frame.Left;
+                Check("mouse frame keeps the board's key gap",
+                    Math.Abs(frameMargin - horizontal) <= 1.5f,
+                    frameMargin.ToString("0.0") + " vs " + horizontal.ToString("0.0"));
+
+                // Collapsing animates the card width; the drawing inside must keep its
+                // size and its position relative to the leading edge (no rescaling).
+                pad.ExpandedWidth = pad.Width;
+                RectangleF openFrame = pad.FrameBoundsForTest();
+                int openWidth = pad.Width;
+                pad.SetBounds(0, 0, Math.Max(60, openWidth - 70), pad.Height);
+                RectangleF narrowFrame = pad.FrameBoundsForTest();
+                Check("collapsing the card does not rescale the mouse",
+                    Math.Abs(narrowFrame.Width - openFrame.Width) <= 0.5f
+                    && Math.Abs(narrowFrame.Height - openFrame.Height) <= 0.5f
+                    && Math.Abs(narrowFrame.Left - openFrame.Left) <= 0.5f,
+                    narrowFrame.Width.ToString("0.0") + "x" + narrowFrame.Height.ToString("0.0")
+                    + " vs " + openFrame.Width.ToString("0.0") + "x"
+                    + openFrame.Height.ToString("0.0"));
+            }
+        }
+
         private static void TestKeyboard()
         {
             List<KeyCap> caps = KeyboardLayout.Create();
             Check("keyboard layout is 104 keys", caps.Count == 104, "count=" + caps.Count);
+
+            // The navigation cluster and the arrows must sit centred between the
+            // main block and the numpad, not flush against either one.
+            KeyCap prtSc = caps.Find(delegate(KeyCap c) { return c.Code == Keys.Snapshot; });
+            KeyCap pause = caps.Find(delegate(KeyCap c) { return c.Code == Keys.Pause; });
+            KeyCap numLock = caps.Find(delegate(KeyCap c) { return c.Code == Keys.NumLock; });
+            float navLeftGap = prtSc == null ? -1f : prtSc.X - 15f;
+            float navRightGap = (pause == null || numLock == null)
+                ? -2f : numLock.X - (pause.X + pause.Width);
+            Check("nav cluster is centred between the main block and the numpad",
+                Math.Abs(navLeftGap - navRightGap) < 0.001f,
+                navLeftGap.ToString("0.00") + " / " + navRightGap.ToString("0.00"));
 
             bool inside = true;
             bool noNone = true;
@@ -965,12 +1314,84 @@ namespace CapsLockLite
         }
 
         /// <summary>
+        /// A lifted card is clamped to the surface that paints it: it stops at the
+        /// edge instead of sliding half out, and a card handed over from the other
+        /// surface is pulled back inside the one showing it.
+        /// </summary>
+        private static void TestGhostPlacement()
+        {
+            SizeF card = new SizeF(100f, 40f);
+            Size pane = new Size(300, 200);
+
+            PointF corner = GhostPlacement.Clamp(new PointF(-40f, 400f), card, pane);
+            Check("ghost card stops at the surface edge",
+                Math.Abs(corner.X - 2f) < 0.01f && Math.Abs(corner.Y - 158f) < 0.01f,
+                corner.ToString());
+
+            PointF inside = GhostPlacement.Clamp(new PointF(60f, 50f), card, pane);
+            Check("ghost card keeps its place inside the surface",
+                inside.X == 60f && inside.Y == 50f, inside.ToString());
+
+            PointF big = GhostPlacement.Clamp(new PointF(40f, 40f), new SizeF(400f, 300f), pane);
+            Check("ghost card bigger than the surface pins to the margin",
+                Math.Abs(big.X - 2f) < 0.01f && Math.Abs(big.Y - 2f) < 0.01f, big.ToString());
+
+            Point shift = GhostPlacement.ClampOffset(new RectangleF(-30f, -10f, 100f, 40f), pane);
+            Check("handed card is pulled back inside the surface",
+                shift.X == 32 && shift.Y == 12, shift.ToString());
+        }
+
+        /// <summary>
+        /// A lifted card hides the key name but keeps the action line where the
+        /// source paints it: the action row starts after the (invisible) name rows,
+        /// both centred as one block, and it is the same rule the source uses.
+        /// </summary>
+        private static void TestActionRowPlacement()
+        {
+            KeyActionLayout layout = new KeyActionLayout();
+            layout.RowText = new[] { "左键" };
+            layout.RowFont = new[] { Theme.Body };
+            layout.RowHeight = new[] { 20 };
+            layout.ActionText = "复制";
+            layout.ActionFont = Theme.Caption;
+            layout.ActionHeight = 14;
+
+            Rectangle face = new Rectangle(100, 100, 80, 200);
+            Rectangle row = KeyVisual.ActionRowRect(face, layout);
+            // 34 px of rows centred in 200 → top at 183, action below the name row.
+            Check("action row keeps the hidden name row's space",
+                row.Y == 203 && row.Height == 14 && row.X == 101 && row.Width == 78,
+                row.ToString());
+        }
+
+        /// <summary>
+        /// The trigger chip of a list row grows with its text. A chord that uses all
+        /// five modifiers is wider than the old fixed 220 px column, which simply cut
+        /// it in half; the chip now takes the room it needs and stops at the row edge.
+        /// </summary>
+        private static void TestTriggerChip()
+        {
+            string five = "Caps + Ctrl + Alt + Shift + Win + Num 5";
+            int fiveNeeded = MappingListItem.ChipNeededWidth(five);
+            Check("five-modifier trigger fits its chip",
+                MappingListItem.TriggerChipWidth(five, Theme.S(700)) >= fiveNeeded,
+                MappingListItem.TriggerChipWidth(five, Theme.S(700)) + " vs " + fiveNeeded);
+
+            string longTrigger = five + " + " + new string('W', 40);
+            int needed = MappingListItem.ChipNeededWidth(longTrigger);
+            int roomy = MappingListItem.TriggerChipWidth(longTrigger, needed + Theme.S(100));
+            Check("trigger chip grows with its text", roomy >= needed, roomy + " vs " + needed);
+
+            int tight = MappingListItem.TriggerChipWidth(longTrigger, Theme.S(120));
+            Check("trigger chip stops at the row edge", tight <= Math.Max(Theme.S(46), Theme.S(120)),
+                tight.ToString());
+        }
+
+        /// <summary>
         /// The block reorder used by the list: a contiguous block of rows keeps
         /// its internal order, and rows around it shift by the block size.
         /// </summary>
-        private static void TestReorderMath()
-        {
-            List<string> items = new List<string> { "a", "b", "c", "d", "e" };
+        private static void TestReorderMath()        {            List<string> items = new List<string> { "a", "b", "c", "d", "e" };
             MListReorder.Move(items, 1, 2, 4);
             bool down = string.Join("", items.ToArray()) == "adbce";
 
@@ -1912,6 +2333,13 @@ public sealed class NoopAction : IPluginAction
                 if (installed) hook.Uninstall();
                 Check("keyboard hook install", installed, "Win32=" + hook.LastError);
             }
+
+            using (MouseHook hook = new MouseHook())
+            {
+                bool installed = hook.Install();
+                if (installed) hook.Uninstall();
+                Check("mouse hook install", installed, "Win32=" + hook.LastError);
+            }
         }
 
         private const string PluginSource = @"
@@ -1998,6 +2426,73 @@ public sealed class NoopAction : IPluginAction
 
             Check("plugin actions are removed on unload",
                 !ActionCatalog.Contains("plugin.selftest.sample.noop"), "");
+        }
+
+        /// <summary>
+        /// Drop-down parameter (ActionParamKind.Select): the plugin declares the
+        /// values, the editor can only store one of them, and the list row shows the
+        /// label instead of the raw value.
+        /// </summary>
+        private static void TestPluginParamChoices()
+        {
+            List<IPluginAction> actions = new List<IPluginAction>();
+            actions.Add(new SelectTestAction());
+            List<string> errors = new List<string>();
+            ActionCatalog.RegisterPluginActions("selftest.select", actions, errors);
+            const string id = "plugin.selftest.select.pick";
+
+            ActionDef def = ActionCatalog.Get(id);
+            Check("select parameter registers", def != null && def.ParamKind == ActionParamKind.Select,
+                def == null ? "missing" : def.ParamKind.ToString());
+            Check("select parameter reads value|label pairs",
+                def != null && def.ChoiceCount == 2
+                    && def.ChoiceValues[0] == "dark" && def.ChoiceLabels[0] == "深色"
+                    && def.ChoiceValues[1] == "light" && def.ChoiceLabels[1] == "浅色",
+                def == null ? "" : def.ChoiceCount + " / " + def.ChoiceLabelOf("light"));
+            Check("select row shows the label",
+                ActionCatalog.Describe(id, "light").IndexOf("浅色", StringComparison.Ordinal) >= 0,
+                ActionCatalog.Describe(id, "light"));
+            Check("select parameter defaults to the first choice",
+                ActionCatalog.NormalizeParam(id, "") == "dark",
+                ActionCatalog.NormalizeParam(id, ""));
+            Check("select parameter keeps a stored value",
+                ActionCatalog.NormalizeParam(id, "light") == "light",
+                ActionCatalog.NormalizeParam(id, "light"));
+
+            // A Select action without the companion interface must not crash the host
+            // and must not offer a value it cannot explain.
+            List<IPluginAction> bare = new List<IPluginAction>();
+            bare.Add(new SelectTestAction(false));
+            ActionCatalog.RegisterPluginActions("selftest.bare", bare, errors);
+            ActionDef bareDef = ActionCatalog.Get("plugin.selftest.bare.pick");
+            Check("select without choices is handled",
+                bareDef != null && bareDef.ChoiceCount == 0
+                    && ActionCatalog.NormalizeParam("plugin.selftest.bare.pick", "") == "",
+                bareDef == null ? "missing" : bareDef.ChoiceCount.ToString());
+
+            ActionCatalog.UnregisterPluginActions();
+        }
+
+        private sealed class SelectTestAction : IPluginAction, IPluginParamChoices
+        {
+            private readonly string[] _choices;
+
+            public SelectTestAction() : this(true) { }
+
+            public SelectTestAction(bool withChoices)
+            {
+                _choices = withChoices ? new[] { "dark|深色", "light|浅色" } : null;
+            }
+
+            public string Id { get { return "pick"; } }
+            public string Category { get { return "测试"; } }
+            public string Name { get { return "选择样式"; } }
+            public string Description { get { return "自检用动作"; } }
+            public ActionParamKind ParamKind { get { return ActionParamKind.Select; } }
+            public string DefaultParam { get { return "dark"; } }
+            public bool Repeatable { get { return false; } }
+            public string[] ParamChoices { get { return _choices; } }
+            public void Execute(PluginContext context) { }
         }
 
         private sealed class TestHost : IAppHost

@@ -32,14 +32,34 @@ namespace CapsLockLite
         public static void Chip(Graphics g, Rectangle bounds, string text, Font font,
             Color fill, Color stroke, Color fore)
         {
+            Chip(g, bounds, text, font, fill, stroke, fore, ChipTextFlags);
+        }
+
+        private const TextFormatFlags ChipTextFlags =
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping;
+
+        /// <summary>
+        /// Drawn chip with explicit text flags. Left-aligned text (used when the
+        /// content has to be trimmed) is inset by a normal chip padding so a glyph
+        /// never touches the rounded border.
+        /// </summary>
+        public static void Chip(Graphics g, Rectangle bounds, string text, Font font,
+            Color fill, Color stroke, Color fore, TextFormatFlags textFlags)
+        {
             RectangleF r = new RectangleF(bounds.X + 0.5f, bounds.Y + 0.5f,
                 Math.Max(1f, bounds.Width - 1f), Math.Max(1f, bounds.Height - 1f));
             float radius = Theme.SF(Theme.RadiusChip);
             Theme.FillRound(g, r, radius, fill);
             if (stroke.A > 0) Theme.StrokeRound(g, r, radius, stroke, 1f);
-            TextRenderer.DrawText(g, text, font, bounds, fore,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+
+            Rectangle textRect = bounds;
+            if ((textFlags & TextFormatFlags.HorizontalCenter) == 0)
+            {
+                textRect = new Rectangle(bounds.X + Theme.S(8), bounds.Y,
+                    Math.Max(1, bounds.Width - Theme.S(16)), bounds.Height);
+            }
+            TextRenderer.DrawText(g, text, font, textRect, fore, textFlags);
         }
     }
 
@@ -56,6 +76,35 @@ namespace CapsLockLite
         }
 
         public KeyMapping Mapping { get { return _mapping; } }
+
+        private const TextFormatFlags ChipTextFlags =
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping;
+
+        // A combination too long for the row keeps its beginning and loses the tail:
+        // centred text would be cut on both sides and read as a different chord.
+        private const TextFormatFlags ChipTextFlagsTrimmed =
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis |
+            TextFormatFlags.PreserveGraphicsClipping;
+
+        /// <summary>Width a trigger needs to be drawn without trimming.</summary>
+        internal static int ChipNeededWidth(string trigger)
+        {
+            return Theme.Measure(trigger == null ? "" : trigger, Theme.KeyCap).Width + Theme.S(18);
+        }
+
+        /// <summary>
+        /// Width the trigger chip gets inside <paramref name="available"/> pixels.
+        /// Exposed so the self-test can prove a five-modifier chord is not clamped
+        /// to the old fixed 220 px column.
+        /// </summary>
+        internal static int TriggerChipWidth(string trigger, int available)
+        {
+            int needed = ChipNeededWidth(trigger);
+            int max = Math.Max(Theme.S(46), available);
+            return Math.Max(Theme.S(46), Math.Min(needed, max));
+        }
 
         public override string Key
         {
@@ -94,17 +143,6 @@ namespace CapsLockLite
             int chipHeight = Theme.S(26);
             int chipY = bounds.Y + (bounds.Height - chipHeight) / 2;
             int chipX = bounds.X + Theme.S(16);
-            int maxChip = Theme.S(220);
-
-            string trigger = _mapping.TriggerText;
-            Size textSize = Theme.Measure(trigger, Theme.KeyCap);
-            int chipWidth = Math.Min(maxChip, textSize.Width + Theme.S(18));
-            Rectangle chipRect = new Rectangle(chipX, chipY, Math.Max(Theme.S(46), chipWidth), chipHeight);
-
-            RowPaint.Chip(g, chipRect, trigger, Theme.KeyCap,
-                on ? Theme.Layer : Theme.Surface,
-                on ? Theme.Stroke : Theme.Stroke,
-                on ? Theme.TextPrimary : Theme.TextDisabled);
 
             // Type tag sits right before the toggle. Since 1.8.1 the trigger layer
             // is always Caps, so the old "范围" column would repeat the same word on
@@ -141,8 +179,25 @@ namespace CapsLockLite
                     Theme.DangerSoft, Theme.Alpha(Theme.Danger, 110), Theme.Danger);
             }
 
-            int textX = chipRect.Right + Theme.S(14);
+            // The trigger chip grows with its content instead of stopping at a fixed
+            // 220 px: a combination with all five modifiers is wider than that and
+            // was simply cut in half. The action name keeps its own minimum, so the
+            // chip can never take the whole row.
             int rightEdge = duplicateRect.IsEmpty ? typeRect.X : duplicateRect.X;
+            string trigger = _mapping.TriggerText;
+            int chipAvailable = Math.Max(Theme.S(46),
+                rightEdge - Theme.S(24) - Theme.S(160) - chipX);
+            int chipWidth = TriggerChipWidth(trigger, chipAvailable);
+            bool chipFits = chipWidth >= ChipNeededWidth(trigger);
+            Rectangle chipRect = new Rectangle(chipX, chipY, chipWidth, chipHeight);
+
+            RowPaint.Chip(g, chipRect, trigger, Theme.KeyCap,
+                on ? Theme.Layer : Theme.Surface,
+                on ? Theme.Stroke : Theme.Stroke,
+                on ? Theme.TextPrimary : Theme.TextDisabled,
+                chipFits ? ChipTextFlags : ChipTextFlagsTrimmed);
+
+            int textX = chipRect.Right + Theme.S(14);
             int textWidth = Math.Max(Theme.S(40), rightEdge - Theme.S(10) - textX);
             Rectangle textRect = new Rectangle(textX, bounds.Y, textWidth, bounds.Height);
             TextRenderer.DrawText(g, _mapping.ActionText, on ? Theme.Body : Theme.Body, textRect,
@@ -293,7 +348,8 @@ namespace CapsLockLite
 
             Theme.DrawText(g, _plugin.Name, Theme.BodyStrong,
                 new Rectangle(textX, bounds.Y + Theme.S(6), textWidth, Theme.S(22)),
-                Theme.TextPrimary, TextFormatFlags.PreserveGraphicsClipping);
+                Theme.TextPrimary,
+                TextFormatFlags.EndEllipsis | TextFormatFlags.PreserveGraphicsClipping);
 
             string meta = _plugin.IsLoaded
                 ? _plugin.Id + "  ·  v" + _plugin.Version
@@ -301,7 +357,8 @@ namespace CapsLockLite
                 : _plugin.FileName + (_plugin.Trusted ? "  ·  未能加载" : "  ·  未信任");
             Theme.DrawText(g, meta, Theme.Caption,
                 new Rectangle(textX, bounds.Y + Theme.S(28), textWidth, Theme.S(20)),
-                Theme.TextTertiary, TextFormatFlags.PreserveGraphicsClipping);
+                Theme.TextTertiary,
+                TextFormatFlags.EndEllipsis | TextFormatFlags.PreserveGraphicsClipping);
 
             RowPaint.Chip(g, countRect, countText, Theme.Caption,
                 Theme.Layer, Theme.Stroke, Theme.TextSecondary);

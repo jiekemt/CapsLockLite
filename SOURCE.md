@@ -1,6 +1,6 @@
 # CapsLock Lite 源码说明
 
-版本：1.21.4  
+版本：1.25.2  
 目标框架：.NET Framework 4.8  
 界面：Windows Forms（全部自绘控件）  
 构建方式：系统自带 `csc.exe`，不依赖 Visual Studio / NuGet
@@ -55,11 +55,12 @@ LICENSE                MIT License
 | `AppInfo.cs` | 用户可见版本号的唯一来源（`AppInfo.Version`） |
 | `MainForm.cs` | 主界面、托盘、设置页、配置导入导出 |
 | `MainFormKeyboard.cs` | 快捷键页的键盘区：修饰键筛选、键位选择与拖动搬运、收起动画、右键菜单 |
+| `MousePad.cs` | 快捷键页右侧的鼠标卡片：直线多边形外框、五个热区、与键帽同源的状态/计数/右键菜单，以及与键盘之间的双向拖动 |
 | `KeyboardPreview.cs` | 键盘布局模型（104 键、键位单位）、筛选规则、键帽文字适配、自绘键盘控件（含拖动浮层）与区块标题 |
 | `MPopupMenu.cs` | 自绘弹层菜单（`⋯` 菜单与下拉框共用） |
 | `MainFormPlugins.cs` | 插件页：导入、重载、卸载、详情、设置页 |
 | `MappingEditorForm.cs` | 快捷键编辑、触发类型、动作参数 |
-| `HotkeyManager.cs` | 低层键盘钩子、Caps 层状态机、长按连发 |
+| `HotkeyManager.cs` | 低层键盘/鼠标钩子、Caps 层状态机、长按连发 |
 | `ActionExecutor.cs` | 动作队列与具体动作 |
 | `ActionCatalog.cs` | 动作目录（类目顺序、类型判定）、默认可连发能力、默认键位、插件动作注册 |
 | `PluginApi.cs` | 插件对外契约：`IPlugin` / `IPluginAction` / `PluginContext` / `ActionParamKind` / 可选设置页接口 |
@@ -70,6 +71,8 @@ LICENSE                MIT License
 | `ConfigStore.cs` | JSON 配置、日志、可写目录探测、字段归一化 |
 | `ModernControls.cs` / `Theme.cs` | 自绘控件、浅色/深色主题 |
 | `ModernInputs.cs` / `ModernDialog.cs` | 圆角输入框、数字框、多行文本、只读文本视图，以及替代系统提示框的提示/确认对话框 |
+| `MouseKeys.cs` | 鼠标触发的伪键码（`0x0E01`–`0x0E05`），超出键盘钩子上报范围，不会与真实按键冲突 |
+| `MouseHook.cs` | 低层鼠标钩子（`WH_MOUSE_LL`），只翻译左/右/中键与垂直滚轮，其余事件原样放行 |
 | `MousePoint.cs` | 「鼠标点击」参数（按钮 + 虚拟屏幕坐标）、抓取坐标时的窗口移屏与按键确认 |
 | `ModernList.cs` / `ListItems.cs` / `ListSelection.cs` | 自绘虚拟列表（多选、拖动排序、行内开关、右键菜单事件）、各页面的行与选择模型 |
 | `KeyText.cs` | 键名格式化与解析（`Caps + Alt + E`）；方向键存为 `↑ ↓ ← →`，解析同时认字形与 `UP/DOWN/LEFT/RIGHT` 英文名；小键盘存为 `Num 7`，`TryParseNumpad` 同时认 `Num 7` / `Num7` / `NumPad7` / `小键盘 7` |
@@ -102,7 +105,7 @@ public string TriggerMode { get; set; } // "once" 或 "hold"
 - `once`：按下单发，按住不重复。
 - `hold`：按住约 450ms 后每 33ms（每秒 30 发）重复一次，松开主键或 Caps Lock 停止。`input.keys` 走物理长按：`HotkeyManager` 抛 `HoldStarted`/`HoldRepeated`/`HoldEnded`，`ActionExecutor.BeginKeyHold` 只发 keydown（先按 Ctrl/Alt/Shift/Win 修饰，再按主键），`RepeatKeyHold` 只补 keydown，`EndKeyHold` 才发唯一一次 keyup——两条路径共用 `Native.SendKeyState`（单条 SendInput，不带 KEYEVENTF_KEYUP 或带）。其他可连发动作仍走 `ActionTriggered` 重复执行。节奏不能交给 `System.Windows.Forms.Timer` 的 `Interval`：系统时钟粒度约 15.6ms，`Interval=33` 实际会落到 46.8ms（每秒 21 发）。连发阶段用 `timeBeginPeriod(1)` 提高时钟精度，定时器只负责唤醒（`Interval=1`），是否到期由 `Stopwatch` 累加 33ms 判定，退出连发时 `timeEndPeriod(1)` 还原。
 - `ActionDef.Repeatable` 表示动作是否具备连发能力；不适用的动作在编辑器里置灰。
-- 归一化逻辑在 `ConfigStore.Normalize`：可连发动作缺省为 `hold`，不可连发动作强制为 `once`。
+- 归一化逻辑在 `ConfigStore.Normalize`：可连发动作缺省为 `hold`，不可连发动作强制为 `once`；滚轮主键没有抬起事件，`NormalizeMappings` 也会把它强制成 `once`，编辑页在 `UpdateModeState` 里同样会置灰“按住连发”。
 
 ### 快捷键页的键盘区
 
@@ -130,6 +133,17 @@ public string TriggerMode { get; set; } // "once" 或 "hold"
 - 键帽字号是**像素字号**、随键宽缩放（`KeyLabel.CreateFonts`，7.5/6/5 的老方案已废弃）：布局单位是像素，而点值字体会按系统 DPI 放大，在 120 dpi 上比键帽大 25%，必然截断。`KeyLabel.Plan` 按「完整 → 小一号 → 再小一号 → 空格换行 → 省略号」选择，自检 `KeyboardLabelAudit` 用同一套规则遍历 560–1600 像素页宽（每 20px 一档），任何一个键名落到省略号都算失败。
 - 动作名有两条自检线：`KeyboardLabelAudit.ActionProblems` 按页宽扫描全部 104 个键的合成布局，`MKeyboardView.LayoutProblems` 再按控件的真实像素矩形复核一遍。只测其中一条会漏掉「审计按单位算、绘制按取整后的矩形算」这类偏差。
 - 截图核对用 `--demo=keycaps`（Caps 筛选）、`keycombo`（Caps+Alt）、`keykey`（单键）、`keycollapsed`（收起）、`keymid`（动画中间态）、`keysmall`（最小窗口）、`keylarge`（大窗口）、`keymenu`（展开 ⋯ 菜单）；`--demo=min` 只缩窗口。这些入口只在 `DEBUG` 构建中编译（`build.ps1` 默认不定义），发布版解析不到 `--demo`，也不存在 `--demo=import`。
+
+### 鼠标卡片
+
+- 快捷键页的列表右侧是 200px 宽的鼠标卡片（`MMousePad`），与列表同高；列表相应收窄 200px。卡片可折叠成 30px 窄条，收起后列表恢复全宽；页面宽度不足 860 逻辑像素时卡片整体让位，不让列表被挤窄。
+- 外框是 12 个顶点的直线多边形（`BodyOutline`，150×210 单位空间），左/右键的热区直接复用同一轮廓、整体内缩 2 单位，滚轮列在 57–93 之间按 2 单位缝分三格。几何在 `EnsureGeometry` 里按卡片尺寸等比缩放并缓存，命中测试用 `GraphicsPath.IsVisible`（斜肩不能按矩形判定）。
+- 状态与键帽同源：`ComputeState` 统计该热区在当前修饰键组合下的总数/精确数/启用数；配色、文字色、停用斜线、悬停提亮、计数徽标统一走 `KeyVisual`（`KeyVisual.cs`），键帽的 `DrawKey` 与鼠标卡片调用同一组函数，因此两边的状态画法不会漂移。徽标直径/字号/内缩直接取键盘的键位单位（`BadgeUnit`），与键帽徽标分毫不差。选中环用 `TextPrimary`，拖放目标用 `Accent` 2px 环。
+- 交互与键帽一致：点选筛选（第二次点选取消，双击的第二下保持选中）、双击编辑、右键菜单走同一个 `ShowKeyboardMenu`、Del/Enter/Ctrl+X/C/V 仍按 `_selectedKey` 生效。
+- 3D 与文字：热区多边形当「格子」，可见键面 = 格子按 `min(格子高*0.10, max(1.5, 键位单位*0.06))` 削掉底部；阴影带 = 键面下移一个深度，只有键面被描边，所以阴影落在键面之外。标题/动作名直接复用键盘的 `KeyLabel.CreateFonts` + `KeyLabel.Plan` + `KeyActionText.Layout`（`KeyVisual.DrawLabel` / `DrawActionLayout`），字体阶梯、字重、两行/省略规则与键帽完全相同；动作名只在选中修饰键后绘制。
+- 跨区拖动：拖动源在指针离开自己的范围后不再绘制浮卡（子控件只能画在自己范围内），改为每帧抛 `DragPointerMoved(title, action, screen, outside)`，页面把它转给指针所在的另一块界面（`SetExternalDrag`），由那一侧画同一张浮卡（阴影 + 面板 + `Accent` 2 边框 + 强调色标题/动作）。两个方向的落点仍然都调用 `MoveKeyBindings`。
+- 双向拖动：键盘拖动时 `MKeyboardView.OnMouseMove` 发现指针离开板面就通过 `ExternalDropTarget` 问鼠标卡片落点，命中后 `SetExternalDrop` 高亮并抛 `ExternalTargetChanged`；松开走 `KeyDragDroppedExternal`。反向由 `MMousePad` 自己捕获鼠标、用 `ExternalDropTarget` 问 `KeyAtScreen`，键盘用 `SetExternalDropKey` 高亮。两个方向最终都调用同一个 `MoveKeyBindings(from, to)`，所以冲突确认、撤销快照、自动选中目标键的行为完全一致。
+- 键盘的导航键区（PrtSc/Ins/Del 与方向键）在 15.25u 起排：左侧与主键区、右侧与数字小键盘都留 0.25u，之前从 15.5u 起排会贴着数字小键盘。
 
 ### 快捷键列表
 
@@ -201,6 +215,16 @@ public string TriggerMode { get; set; } // "once" 或 "hold"
 - 长按连发由 `_repeatTimer` 主动驱动，不依赖系统自动重复；主键或 Caps Lock 松开时停止。
 - 多键叠加按「最后按下为准」，但**每个按下的键都保持按住**：`_chordEntries` 记录 Caps 层里仍按着的主键（键、映射、是否已在目标上按住）。`DeliverChord` 启动新组合时只调 `StopRepeatOnly()`（停连发，不触发 `HoldEnded`），旧键的 `HeldOnTarget` 保持不变；只有用户的物理 keyup 才 `ReleaseChordHold` 补一次 `HoldEnded`。`ActionExecutor` 因此维护 `List<HeldKey> _holds`（可同时按住多个键，`EndKeyHold(mapping)` 只松开对应映射，`EndKeyHold(null)` 全松），修饰键只在没有其它 hold 需要时才发送 keyup。松开最新的键时 `ResumeHeldChord` 只把连发交回仍按着的最新主键，不会重复 `HoldStarted`。Caps 松开、`ResetState`、退出应用都会调用 `ReleaseAllChords` 把所有 hold 放掉，避免键卡在目标程序里。
 - 模拟按键带 `KEYEVENTF_INJECTED` 标记，钩子会忽略注入事件，避免自触发。
+
+### 鼠标触发
+
+- 五种鼠标触发（左键、右键、中键、滚轮上滑、滚轮下滑）复用 `KeyMapping.Key`：`MouseKeys` 提供 `0x0E01`–`0x0E05` 五个伪键码。键盘钩子上报的是 0–255 的虚拟键码，所以这些值不会被真实按键命中，`ConfigStore` 的配置格式与 `ConfigVersion` 都不用改，`MappingConflicts` 照常按 `Key & 0xFFFF` 判重。
+- `MouseHook` 只在 Caps 层存在的期间安装：`OnHookKey` 的 Caps down 分支调 `EnsureMouseHook` 挂上 `WH_MOUSE_LL`，Caps up 和 `Stop`/`ResetState` 时卸载，所以平时的鼠标输入完全不经过本程序。它只翻译 `WM_LBUTTONDOWN/UP`、`WM_RBUTTONDOWN/UP`、`WM_MBUTTONDOWN/UP`、`WM_MOUSEWHEEL`；鼠标移动、横向滚轮、X 键一律放行。`KeyboardHook` 安装失败仍然中止启动；`MouseHook` 失败只写一次日志并继续（键盘是核心功能，鼠标触发可以没有）。
+- `HotkeyManager.OnHookMouse` 只在 `_capsDown` 时介入，而且**只在找到绑定动作时才吞事件**：没有绑定的鼠标键照常点击、滚动，不会因为按住 Caps 就把鼠标弄死。被吞的按下会记进 `_swallowedMouseButtons`，对应的抬起也一并吞掉，避免目标程序收到没有配对的 button-up。
+- 鼠标键复用键盘的 `_downKeys` / `_chordEntries` / `DeliverChord`，所以「按住连发」「多键叠加」「目标程序里保持按住」的行为与键盘完全一致。滚轮没有抬起事件，`HandleWheel` 按 120 单位累计后一次触发（精度触摸板会发很多小数 delta），单条消息最多补 3 次，方向改变或停顿 800ms 会重置累计；滚轮永远不会进入 `_repeatTimer`，编辑页在 `UpdateModeState` 里把「按住连发」置灰并在保存时强制 `once`。
+- 录制鼠标键由 `MKeyCapture.AllowMouse` 控制（默认关闭，`MKeyComboField` 的「发送按键」参数仍然是纯键盘捕获）。获得焦点时 `ArmMouse` 安装一个临时 `MouseHook`，录到第一个按下/滚轮后 `_mouseArmed=false` 但保留钩子：之后的点击原样放行，对话框按钮可以正常点；再点一下主键框（`OnMouseDown`）重新进入录制。失去焦点或 `AllowMouse=false` 时卸载钩子。
+- 「鼠标点击」动作通过 `mouse_event` 发合成点击时把 `dwExtraInfo` 设成 `Native.SyntheticMarker`，`MouseHook` 在回调里直接放行带该标记的事件，避免动作自己的点击又被当成 `Caps + 鼠标左键` 触发。
+- 键盘页不渲染鼠标触发：`KeyboardPreview.Recompute` 用 `IndexOfKey` 找键帽，伪键码找不到对应键帽就自然跳过，不需要额外的黑名单。
 
 ### 插件
 
