@@ -113,6 +113,8 @@ namespace CapsLockLite
         // gesture fires one action instead of dozens.
         private int _wheelAccum;
         private int _wheelSign;
+        /// <summary>Sanity bound for a stuck device, not a speed limit.</summary>
+        private const int MaxNotchesPerMessage = 50;
         private DateTime _wheelAt;
         // Chord keys that are physically down. Every one of them keeps its key
         // down on the target's behalf (a real keyboard never releases a key just
@@ -127,7 +129,7 @@ namespace CapsLockLite
         }
 
         private readonly List<ChordEntry> _chordEntries = new List<ChordEntry>();
-        private readonly Timer _repeatTimer = new Timer();
+        private Timer _repeatTimer;
         private KeyMapping _repeatMapping;
         private Keys _repeatKey;
         private bool _repeatGlobal;
@@ -146,6 +148,53 @@ namespace CapsLockLite
         private bool _pausedForDialog;
         private string _lastIssueReport = "";
         private bool _mouseHookReported;
+        private volatile bool _processInjected;
+        private DispatcherThread _thread;
+        private bool _disposed;
+
+        /// <summary>
+        /// Marschal to the UI thread for the few things a hook callback cannot do
+        /// itself (the coordinate picker opens/closes windows). Set by the form.
+        /// </summary>
+        internal Action<Action> UiPost;
+
+        private DispatcherThread Thread
+        {
+            get
+            {
+                if (_thread == null) _thread = new DispatcherThread("CapsLockLite.Hooks");
+                return _thread;
+            }
+        }
+
+        /// <summary>
+        /// The timer needs a message loop, so it is created on the hook thread the
+        /// first time a repeat starts rather than in the constructor.
+        /// </summary>
+        private Timer RepeatTimer
+        {
+            get
+            {
+                if (_repeatTimer == null)
+                {
+                    _repeatTimer = new Timer();
+                    _repeatTimer.Interval = RepeatDelayMs;
+                    _repeatTimer.Tick += RepeatTick;
+                }
+                return _repeatTimer;
+            }
+        }
+
+        private void PostToUi(Action work)
+        {
+            Action<Action> post = UiPost;
+            if (post != null)
+            {
+                post(work);
+                return;
+            }
+            work();
+        }
 
         public event Action<KeyMapping> ActionTriggered;
         public event Action<string, MInfoSeverity> StatusChanged;
@@ -162,8 +211,13 @@ namespace CapsLockLite
         public bool IsRunning { get { return _running; } }
         public bool ProcessInjected
         {
-            get { return _hook.ProcessInjected; }
-            set { _hook.ProcessInjected = value; }
+            get { return _processInjected; }
+            set
+            {
+                _processInjected = value;
+                if (_thread == null) return;
+                _thread.Post(delegate { _hook.ProcessInjected = value; });
+            }
         }
 
         public HotkeyManager(AppSettings settings, IntPtr owner)
@@ -172,16 +226,13 @@ namespace CapsLockLite
             _owner = owner;
             _hook.KeyEvent += OnHookKey;
             _mouseHook.MouseEvent += OnHookMouse;
-
-            _repeatTimer.Interval = RepeatDelayMs;
-            _repeatTimer.Tick += RepeatTick;
         }
 
         /// <summary>
         /// Sends one key transition to the system. Replaced in self-tests so a
         /// simulated sequence never types into the real desktop.
         /// </summary>
-        internal Action<Keys, bool> SendKeyState = delegate(Keys key, bool up) { Native.SendKeyState(key, up); };
+        internal Action<Keys, bool> SendKeyState = delegate(Keys key, bool up) { InputPipeline.SendKeyState(key, up); };
 
         /// <summary>
         /// Modifiers pressed before CapsLock were already delivered to the target
@@ -224,6 +275,8 @@ namespace CapsLockLite
 
         public void UpdateSettings(AppSettings settings)
         {
+            // A reference assignment is atomic; the hook thread reads the newest
+            // settings on its next event, which is what the layer needs.
             _settings = settings;
         }
 
@@ -232,10 +285,23 @@ namespace CapsLockLite
             _owner = owner;
         }
 
+        /// <summary>
+        /// Installs the hooks on the hook thread and waits until they are in place.
+        /// Everything below this line runs on that thread.
+        /// </summary>
         public bool Start()
+        {
+            if (_settings == null || !_settings.Enabled) return false;
+            bool started = false;
+            Thread.Send(delegate { started = StartCore(); });
+            return started;
+        }
+
+        private bool StartCore()
         {
             if (_running) return true;
             if (_settings == null || !_settings.Enabled) return false;
+            _hook.ProcessInjected = _processInjected;
             ResetState();
 
             if (!_hook.Install())
@@ -245,16 +311,30 @@ namespace CapsLockLite
                 return false;
             }
 
-            // The mouse hook is only needed while the Caps layer is active; it is
-            // installed by EnsureMouseHook on Caps down and removed on Caps up, so
-            // normal pointing never pays for a low-level hook. A refused mouse hook
-            // only costs the mouse triggers, so it must not stop the app.
+            // The mouse hook stays installed for as long as the layer runs. It used to
+            // follow Caps because nothing else needed it, but it is also the only way
+            // to see that this app's own click has really been handed on: with the hook
+            // only present while Caps was held, a macro's Ctr+click had no delivery
+            // signal and had to rely on a timer, which is what let the modifier come up
+            // before the click occasionally. A refused mouse hook only costs the mouse
+            // triggers and that signal, so it must not stop the app.
+            EnsureMouseHook();
             _running = true;
             ReportConflicts();
             return true;
         }
 
         public void Stop()
+        {
+            if (_thread == null)
+            {
+                _running = false;
+                return;
+            }
+            _thread.Send(delegate { StopCore(); });
+        }
+
+        private void StopCore()
         {
             if (!_running && !_hook.IsInstalled && !_mouseHook.IsInstalled)
             {
@@ -316,8 +396,8 @@ namespace CapsLockLite
             _repeatKey = key;
             _repeatGlobal = global;
             _repeatPhysical = IsPhysicalHold(mapping);
-            _repeatTimer.Interval = RepeatDelayMs;
-            _repeatTimer.Start();
+            RepeatTimer.Interval = RepeatDelayMs;
+            RepeatTimer.Start();
         }
 
         private void RepeatTick(object sender, EventArgs e)
@@ -383,7 +463,7 @@ namespace CapsLockLite
             Native.TimeBeginPeriod(1);
             _repeatClock.Restart();
             _repeatNextMs = RepeatIntervalMs;
-            _repeatTimer.Interval = 1;
+            if (_repeatTimer != null) _repeatTimer.Interval = 1;
         }
 
         private void LeavePreciseRepeat()
@@ -392,7 +472,7 @@ namespace CapsLockLite
             _repeatPrecise = false;
             _repeatClock.Stop();
             Native.TimeEndPeriod(1);
-            _repeatTimer.Interval = RepeatDelayMs;
+            if (_repeatTimer != null) _repeatTimer.Interval = RepeatDelayMs;
         }
 
         private void StopRepeat()
@@ -412,7 +492,7 @@ namespace CapsLockLite
         /// </summary>
         private void StopRepeatOnly()
         {
-            _repeatTimer.Stop();
+            if (_repeatTimer != null) _repeatTimer.Stop();
             LeavePreciseRepeat();
             _repeatPhysical = false;
             _repeatMapping = null;
@@ -507,8 +587,12 @@ namespace CapsLockLite
 
         private void ResetState()
         {
+            // Booked injections belong to a run of the layer; a stale claim could
+            // otherwise swallow the first physical key after a restart.
+            SyntheticLedger.Clear();
             ReleaseAllChords();
             _mouseHook.Uninstall();
+            SyntheticLedger.MouseClaimsActive = false;
             _capsDown = false;
             _capsChordUsed = false;
             _physicalModifiers.Clear();
@@ -523,12 +607,17 @@ namespace CapsLockLite
         }
 
         /// <summary>
-        /// Installs the mouse hook for the duration of the Caps layer. Called on
-        /// Caps down; Caps up (and Stop) removes it again.
+        /// Installs the mouse hook if it is not there yet. It stays installed for the
+        /// whole run (see StartCore): the Caps layer uses it not only for mouse
+        /// triggers but also to see when its own clicks have been handed on.
         /// </summary>
         private void EnsureMouseHook()
         {
-            if (_mouseHook.IsInstalled || _mouseHook.Install()) return;
+            if (_mouseHook.IsInstalled || _mouseHook.Install())
+            {
+                SyntheticLedger.MouseClaimsActive = true;
+                return;
+            }
             // Report once per session: a security tool that blocks the mouse hook
             // must not fill the log on every Caps press.
             if (_mouseHookReported) return;
@@ -577,6 +666,12 @@ namespace CapsLockLite
 
         private bool OnHookKey(KeyboardEventArgs e)
         {
+            // A driver backend injects below dwExtraInfo, so its strokes come back
+            // looking like hardware. SyntheticLedger claims exactly the ones this app
+            // sent (downs only: an unbooked key-up is always the user letting go) and
+            // they are passed to the target instead of becoming input here.
+            if (SyntheticLedger.Consume(e.Key, e.IsDown)) return false;
+
             Keys pressed = e.Key & Keys.KeyCode;
             if (MousePointCapture.IsActive)
             {
@@ -587,8 +682,14 @@ namespace CapsLockLite
                 {
                     if (e.IsDown)
                     {
-                        if (pressed == Keys.CapsLock) MousePointCapture.ConfirmAtCursor();
-                        else MousePointCapture.Cancel();
+                        if (pressed == Keys.CapsLock)
+                        {
+                            PostToUi(delegate { MousePointCapture.ConfirmAtCursor(); });
+                        }
+                        else
+                        {
+                            PostToUi(delegate { MousePointCapture.Cancel(); });
+                        }
                     }
                     return true;
                 }
@@ -620,7 +721,8 @@ namespace CapsLockLite
                     bool tap = !_capsChordUsed && (DateTime.UtcNow - _capsDownAt).TotalMilliseconds <= _settings.LongPressMs;
                     ReleaseAllChords();
                     _capsDown = false;
-                    _mouseHook.Uninstall();
+                    // The mouse hook stays installed: it is not only for Caps triggers,
+                    // it is also how this app learns that its own click was delivered.
                     _heldBeforeCaps.Clear();
                     RestoreSuppressedModifiers();
                     if (tap) PerformTapAction();
@@ -636,6 +738,13 @@ namespace CapsLockLite
             bool repeat;
             if (e.IsDown)
             {
+                // A key this app holds at the target repeats through the OS, and those
+                // downs are not a new chord (see SyntheticLedger). Checked before
+                // _downKeys so a swallowed repeat leaves no trace: the next real press
+                // must still count as a first press. A key the user is still holding
+                // skips this and keeps its normal auto-repeat handling below.
+                if (!_downKeys.Contains(key) && SyntheticLedger.IsHeldRepeat(key)) return true;
+
                 repeat = !_downKeys.Add(key);
 
                 if (_swallowedKeys.Contains(key))
@@ -711,6 +820,19 @@ namespace CapsLockLite
         /// </summary>
         private bool OnHookMouse(MouseButtonEventArgs e)
         {
+            // See OnHookKey: a driver-injected click carries no marker, so the ledger
+            // is the only thing that tells it apart from a real press.
+            if (SyntheticLedger.Consume(e.Key, e.IsDown))
+            {
+                // An own release also ends the "a physical press of this button is
+                // being swallowed" state. Without this, a physical up that arrived
+                // before our booked one consumed the claim, the state stayed set,
+                // and our real release was then swallowed -- the target kept the
+                // button down, which shows up as clicks that silently do nothing.
+                if (!e.IsDown) _swallowedMouseButtons.Remove(e.Key & Keys.KeyCode);
+                return false;
+            }
+
             if (_settings == null) return false;
             if (MousePointCapture.IsActive) return false;
             if (e.IsInjected && !ProcessInjected) return false;
@@ -728,6 +850,14 @@ namespace CapsLockLite
             {
                 KeyMapping mapping = FindCapsMapping(key);
                 if (mapping == null) return false;
+                if (SyntheticLedger.MouseClickRecent(400))
+                {
+                    // The click was ours but its ledger entry was gone (claimed by
+                    // another event, or the layer restarted between send and hook).
+                    // Report it: the target loses the click and the shortcut fires.
+                    ConfigStore.Log("Caps 层吞下了自己发出的鼠标按键：" + KeyText.FormatKey(key)
+                        + "（账本未认领），这次点击不会到达目标窗口。");
+                }
                 _downKeys.Add(key);
                 _capsChordUsed = true;
                 _swallowedMouseButtons.Add(key);
@@ -751,7 +881,15 @@ namespace CapsLockLite
                 {
                     StopRepeatOnly();
                 }
-                return _swallowedMouseButtons.Remove(key);
+                bool swallow = _swallowedMouseButtons.Remove(key);
+                if (swallow && SyntheticLedger.MouseClickRecent(400))
+                {
+                    // Our own click's release was eaten by the Caps layer: the
+                    // target now holds a button-down it will never see released.
+                    ConfigStore.Log("Caps 层吞下了自己发出的鼠标抬起：" + KeyText.FormatKey(key)
+                        + "，目标窗口的该按钮会保持按下。");
+                }
+                return swallow;
             }
 
             return false;
@@ -780,15 +918,19 @@ namespace CapsLockLite
             }
             _wheelAt = now;
             if (delta < 0) delta = -delta;
-            _wheelAccum += delta == 0 ? 120 : delta;
+            int step = _settings == null ? 120 : _settings.WheelStep;
+            if (step < 40) step = 40;
+            _wheelAccum += delta == 0 ? step : delta;
 
-            int notches = _wheelAccum / 120;
-            _wheelAccum -= notches * 120;
+            int notches = _wheelAccum / step;
+            _wheelAccum -= notches * step;
             if (notches <= 0) return true;
 
-            // One OS message can carry several notches; bound the burst so a stuck
-            // high-resolution device cannot fire hundreds of actions in one go.
-            if (notches > 3) notches = 3;
+            // Only a runaway device is bounded: one OS message can carry several
+            // notches when the wheel is flicked, and every one of them is a real user
+            // action. Truncating those (it used to stop at 3) is what made "I scrolled
+            // eight notches and only three fired".
+            if (notches > MaxNotchesPerMessage) notches = MaxNotchesPerMessage;
             _capsChordUsed = true;
             for (int i = 0; i < notches; i++)
             {
@@ -893,23 +1035,44 @@ namespace CapsLockLite
             if (tap == "none") return;
             if (tap == "esc")
             {
-                Native.SendVirtualKey(Keys.Escape);
+                InputPipeline.Tap(Keys.Escape);
                 return;
             }
             if (tap == "ime")
             {
                 // Win + Space is the Windows "next input method" chord; sending it
                 // from here keeps the caps layer usable while switching languages.
-                Native.SendKeyCombo(Keys.Space, false, false, false, true, 1);
+                InputPipeline.SendCombo(Keys.Space, false, false, false, true, 1);
                 return;
             }
-            Native.ToggleCapsLock();
+            InputPipeline.Tap(Keys.CapsLock);
         }
 
         public void Dispose()
         {
-            Stop();
-            _repeatTimer.Dispose();
+            if (_disposed) return;
+            _disposed = true;
+            DispatcherThread thread = _thread;
+            _thread = null;
+            if (thread != null)
+            {
+                thread.Send(delegate { DisposeCore(); });
+                thread.Dispose();
+            }
+            else
+            {
+                DisposeCore();
+            }
+        }
+
+        private void DisposeCore()
+        {
+            StopCore();
+            if (_repeatTimer != null)
+            {
+                _repeatTimer.Dispose();
+                _repeatTimer = null;
+            }
             _hook.Dispose();
             _mouseHook.Dispose();
         }

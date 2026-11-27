@@ -8,6 +8,8 @@
 
 - `CapsLockLite.exe`
 - `CapsLockLite-SHA256.txt`（exe 的 SHA-256）
+- `interception.dll`（64 位；可选的驱动注入后端用，放在 exe 同目录，见下文「第三方组件」）
+- `interception-LICENSE-LGPL-3.0.txt`（上面那个 DLL 的许可文本，必须同包分发）
 - `README.md`
 - `LICENSE`
 - `PLUGIN.md`（插件开发指南，随程序分发）
@@ -24,6 +26,7 @@
 - `src/`
 - `assets/`（构建所需图标、Logo、图标脚本）
 - `samples/`（示例插件）
+- `third_party/interception/`（`x64/interception.dll`、许可文本与来源说明，见下文「第三方组件」）
 - `app.manifest`
 - `build.ps1`
 - `package.ps1`
@@ -42,6 +45,18 @@
 - `.gitignore`
 
 同样不包含 `preview/`。
+
+## 第三方组件（interception.dll）
+
+「设置 → 行为 → 注入方式 → 驱动注入」需要 64 位的 `interception.dll`。它放在仓库的 `third_party/interception/` 下，打包时随发布包发到 exe 旁边、随源码包整个目录带上。
+
+规则：
+
+- **只分发用户态 DLL，不分发内核驱动**：`keyboard.sys` / `mouse.sys` 和 `install-interception.exe` 一律不进包，由用户自行安装（README「注入方式（可选驱动）」写了步骤）。把驱动打进一个普通应用包会触发杀软，也需要管理员安装，不是本程序的职责。
+- 该 DLL 来自 [oblitum/Interception](https://github.com/oblitum/Interception) v1.0.1 的 `library/x64/interception.dll`，**未做任何修改**；SHA-256 记录在 `third_party/interception/README.txt` 里，升级时同步更新该文件。
+- 许可：非商业用途 **LGPL 3.0**，商业用途需向上游作者单独授权。因此许可文本必须随包分发（`interception-LICENSE-LGPL-3.0.txt`），源码包里同时保留来源说明。
+- 缺这个 DLL 时 `package.ps1` 直接报错退出，不允许打出一个“驱动注入永远回退”的包——这正是 1.26.0 首版发布包出现的问题。
+- 32 位版本（`library/x86`）不打包：程序在 64 位系统上以 64 位运行。
 
 ## 插件包
 

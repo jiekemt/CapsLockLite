@@ -367,9 +367,21 @@ namespace CapsLockLite
         private readonly MButton _capture = new MButton();
         private readonly Label _xLabel;
         private readonly Label _yLabel;
+        private bool _clickOptions;
 
         public MMousePointField()
+            : this(true)
         {
+        }
+
+        /// <summary>
+        /// <paramref name="clickOptions"/> false renders a plain point picker for
+        /// actions that only need a coordinate ("鼠标移动"): no button choice and no
+        /// modifier chips, and the stored value is just "x;y".
+        /// </summary>
+        public MMousePointField(bool clickOptions)
+        {
+            _clickOptions = clickOptions;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
@@ -405,7 +417,35 @@ namespace CapsLockLite
             _capture.Click += delegate { CapturePoint(); };
             Controls.Add(_capture);
 
-            Height = Theme.S(112);
+            ApplyClickOptions();
+        }
+
+        /// <summary>
+        /// False for the "鼠标移动" action: no button choice and no modifier chips. The
+        /// shortcut editor builds a fresh field, the macro step editor keeps one field
+        /// and switches this on every action change.
+        /// </summary>
+        public bool ClickOptions
+        {
+            get { return _clickOptions; }
+            set
+            {
+                if (_clickOptions == value) return;
+                _clickOptions = value;
+                ApplyClickOptions();
+                PerformLayout();
+                Invalidate(true);
+            }
+        }
+
+        private void ApplyClickOptions()
+        {
+            _buttons.Visible = _clickOptions;
+            _ctrl.Visible = _clickOptions;
+            _alt.Visible = _clickOptions;
+            _shift.Visible = _clickOptions;
+            _win.Visible = _clickOptions;
+            Height = _clickOptions ? Theme.S(112) : Theme.S(64);
         }
 
         private MChipToggle MakeChip(string text)
@@ -428,6 +468,7 @@ namespace CapsLockLite
         {
             get
             {
+                if (!_clickOptions) return _x.Value + ";" + _y.Value;
                 MouseClickPoint point = new MouseClickPoint();
                 point.Button = (MouseClickButton)Math.Max(0, Math.Min(2, _buttons.SelectedIndex));
                 point.X = _x.Value;
@@ -441,9 +482,10 @@ namespace CapsLockLite
             set
             {
                 MouseClickPoint point = MouseClickPoint.Parse(value);
-                _buttons.SelectedIndex = (int)point.Button;
                 _x.Value = point.X;
                 _y.Value = point.Y;
+                if (!_clickOptions) return;
+                _buttons.SelectedIndex = (int)point.Button;
                 _ctrl.Checked = point.Ctrl;
                 _alt.Checked = point.Alt;
                 _shift.Checked = point.Shift;
@@ -466,6 +508,17 @@ namespace CapsLockLite
         {
             base.OnResize(e);
             int height = Theme.S(30);
+            if (!_clickOptions)
+            {
+                // One compact row: X, Y and the capture button.
+                int compactCapture = Theme.S(92);
+                _xLabel.SetBounds(0, Theme.S(3), Theme.S(14), Theme.S(22));
+                _x.SetBounds(Theme.S(18), 0, Theme.S(96), Theme.S(28));
+                _yLabel.SetBounds(Theme.S(122), Theme.S(3), Theme.S(14), Theme.S(22));
+                _y.SetBounds(Theme.S(140), 0, Theme.S(96), Theme.S(28));
+                _capture.SetBounds(Width - compactCapture, 0, compactCapture, height);
+                return;
+            }
             int x = 0;
             MChipToggle[] chips = new MChipToggle[] { _ctrl, _alt, _shift, _win };
             for (int i = 0; i < chips.Length; i++)

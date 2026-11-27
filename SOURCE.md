@@ -1,6 +1,6 @@
 # CapsLock Lite 源码说明
 
-版本：1.25.2  
+版本：1.26.1  
 目标框架：.NET Framework 4.8  
 界面：Windows Forms（全部自绘控件）  
 构建方式：系统自带 `csc.exe`，不依赖 Visual Studio / NuGet
@@ -40,6 +40,7 @@ dist\CapsLockLite.exe
 src/                   C# 源码
 assets/                图标、Logo 与图标生成脚本
 samples/plugins/       示例插件（截图）
+third_party/interception/  可选驱动后端的客户端库（x64 interception.dll）、许可与来源说明
 app.manifest           DPI / Windows 版本清单
 build.ps1              构建脚本
 README.md              用户文档
@@ -88,7 +89,10 @@ LICENSE                MIT License
 | `MacroRunner.cs` | 宏执行器：帧栈、每步延迟与次数、嵌套保护 |
 | `Models.cs` / `ConfigStore.cs` 中的 `Macro` / `MacroStep` | 宏与步骤的数据模型，以及配置归一化 |
 | `ConfigDialogs.cs` / `ActionPickerForm.cs` | 配置文本 / 导入导出对话框、动作选择器（原生·插件·宏筛选） |
-| `Native.cs` | Win32 P/Invoke、SendInput、窗口工具 |
+| `Native.cs` | Win32 P/Invoke、SendInput 批量结构、窗口工具 |
+| `InputSink.cs` | 注入抽象：`IInputSink`、系统注入实现 `SendInputSink`、选择与回退路由 `InputPipeline` |
+| `InterceptionSink.cs` | 可选的驱动注入后端（Interception 过滤驱动，动态查找 `third_party/interception/x64/interception.dll`，发布时随包放在 exe 旁） |
+| `SyntheticLedger.cs` | 「本程序注入的按键」账本：驱动注入没有 `dwExtraInfo` 标记，靠它避免 Caps 层吃掉自己的输出 |
 | `StartupManager.cs` | 注册表 / 启动文件夹开机启动 |
 | `SelfTest.cs` | 无界面自检 |
 
@@ -152,6 +156,7 @@ public string TriggerMode { get; set; } // "once" 或 "hold"
 - 多选由 `ListSelection.cs` 的 `MListSelection` 维护：Ctrl 点选切换、Shift 连选、Ctrl+A 全选、方向键配合 Shift 扩展；`MultiSelect` 与 `AllowReorder` 默认关闭，只有快捷键页与插件页打开，`ActionPickerForm` / `ConfigDialogs` 这类选择框仍是单选。
 - 拖动排序：按在选中行上移动超过 4px 才进入拖动；整块跟随指针（15ms Timer + 插值），其余行动画让位，插入位置用强调色横线标出，靠近上下边缘自动滚动。**拖动只存在于左键按住期间**：`StartDrag` 设 `Capture`，`CommitDrag` / `CancelDrag` 释放；动画帧里还会查 `Control.MouseButtons`，鼠标被别的窗口抢走或松开事件丢失时立刻落位，`OnMouseCaptureChanged` 与失焦也提交。松手点（`OnMouseUp` 的 `e.Location`）就是落点。纯算法放在 `MListReorder`（`TargetStart` / `MoveIndex` / `Move<T>`），动画与命中都在 `MListView`。
 - 行尾开关只作用于该行（`ToggleHotspotIndex`），不会把多选里的其它行一起翻掉；批量启停走右键菜单。
+- 两条剪贴板，按焦点区分（`MainForm.ProcessCmdKey`）：列表有焦点且有选中行 → 行剪贴板（`CopySelectedRows` / `CutSelectedRows` / `PasteRows`，纯逻辑在 `MappingClipboard`）；否则有键位选中 → 键位剪贴板（`CopyKeyBindings` 那一套）。切换时不要改这条优先级，否则「先选键位再复制整条组合」会失效。行粘贴生成新 id、插在最后选中行之后（无选中时用剪切位置，再退化为末尾），`MappingClipboard.InsertIndex` 负责这个位置规则，自检 `row paste lands right after the anchor` 锁住。
 - 右键是菜单手势，绝不能顺手切换开关或开始拖动滚动条：`OnMouseDown` 里右键分支必须在开关命中之前返回。
 - 右键落在空白处（`IndexAt` 返回负数、且不在滚动条区域）时不改选择，只抛 `EmptyContextRequested`；快捷键页弹「新增快捷键 / 全选 / 搜索快捷键… / 刷新列表」，插件页弹「导入插件… / 重新加载插件 / 打开插件目录 / 全选」。
 - **WinForms 的 `OnMouseDoubleClick` 对右键双击同样会触发**（`WM_RBUTTONDBLCLK` → `MouseDown(Clicks=2)` + `MouseDoubleClick(Button=Right)`），所以每个双击处理器都要先判 `e.Button == MouseButtons.Left`，否则右键双击会直接打开编辑页。
@@ -214,7 +219,7 @@ public string TriggerMode { get; set; } // "once" 或 "hold"
 - Caps Lock 按下时，先按住的修饰键已经发给目标窗口了，Caps 层必须把它们收回来：`SuppressHeldModifiers` 对每个「已送达」的修饰键补一次 keyup 并记进 `_suppressedModifiers`，于是 Caps+Alt+Q 这类绑定发送 F4 时不会变成 Alt+F4 关掉目标程序；用户松开该修饰键时对应的 keyup 被吞掉（不会补第二次 up），松开 Caps 时 `RestoreSuppressedModifiers` 把仍按住的修饰键补一次 keydown 还给目标。Caps 按下之后才按的修饰键本来就被吞掉（`_swallowedModifiers`），不需要回收与恢复。
 - 长按连发由 `_repeatTimer` 主动驱动，不依赖系统自动重复；主键或 Caps Lock 松开时停止。
 - 多键叠加按「最后按下为准」，但**每个按下的键都保持按住**：`_chordEntries` 记录 Caps 层里仍按着的主键（键、映射、是否已在目标上按住）。`DeliverChord` 启动新组合时只调 `StopRepeatOnly()`（停连发，不触发 `HoldEnded`），旧键的 `HeldOnTarget` 保持不变；只有用户的物理 keyup 才 `ReleaseChordHold` 补一次 `HoldEnded`。`ActionExecutor` 因此维护 `List<HeldKey> _holds`（可同时按住多个键，`EndKeyHold(mapping)` 只松开对应映射，`EndKeyHold(null)` 全松），修饰键只在没有其它 hold 需要时才发送 keyup。松开最新的键时 `ResumeHeldChord` 只把连发交回仍按着的最新主键，不会重复 `HoldStarted`。Caps 松开、`ResetState`、退出应用都会调用 `ReleaseAllChords` 把所有 hold 放掉，避免键卡在目标程序里。
-- 模拟按键带 `KEYEVENTF_INJECTED` 标记，钩子会忽略注入事件，避免自触发。
+- 系统注入的按键带 `Native.SyntheticMarker`（`dwExtraInfo`），钩子凭标记放行，避免自触发；驱动注入没有这个标记，改由 `SyntheticLedger` 认领（见「注入方式与驱动后端」）。
 
 ### 鼠标触发
 
@@ -225,6 +230,27 @@ public string TriggerMode { get; set; } // "once" 或 "hold"
 - 录制鼠标键由 `MKeyCapture.AllowMouse` 控制（默认关闭，`MKeyComboField` 的「发送按键」参数仍然是纯键盘捕获）。获得焦点时 `ArmMouse` 安装一个临时 `MouseHook`，录到第一个按下/滚轮后 `_mouseArmed=false` 但保留钩子：之后的点击原样放行，对话框按钮可以正常点；再点一下主键框（`OnMouseDown`）重新进入录制。失去焦点或 `AllowMouse=false` 时卸载钩子。
 - 「鼠标点击」动作通过 `mouse_event` 发合成点击时把 `dwExtraInfo` 设成 `Native.SyntheticMarker`，`MouseHook` 在回调里直接放行带该标记的事件，避免动作自己的点击又被当成 `Caps + 鼠标左键` 触发。
 - 键盘页不渲染鼠标触发：`KeyboardPreview.Recompute` 用 `IndexOfKey` 找键帽，伪键码找不到对应键帽就自然跳过，不需要额外的黑名单。
+
+### 注入方式与驱动后端
+
+- 所有合成输入只走 `InputPipeline`（`SendStrokes` / `SendCombo` / `SendKeyState` / `Tap` / `SendText` / `MouseButton` / `MouseWheel`），不再直接调 `Native.SendInput`：`ActionExecutor` 的每个动作、`HotkeyManager` 的短按与修饰键回收都经过它。新增发键路径时必须走这里，否则驱动后端会漏掉那条路径。
+- `InputPipeline.Apply` 按 `AppSettings.InputBackend` 选后端：`system` 恒用 `SendInput`；`driver` 每次强制探测驱动，失败时明确报错；`auto` 只在探测成功时切驱动，失败视为正常情况。`MainForm.RestartEngine` 在 `_engine.Stop()` 之后才切换后端，保证旧后端按住的键由旧后端松开；`EnsureRuntime` 在启动前应用一次。
+- 驱动后端拒绝一次发送（键没有扫描码、驱动被卸载）时，`InputPipeline` 会先 `SyntheticLedger.Forget` 掉这批声明，再回退到 `SendInput` 重发，快捷键不会因为驱动掉线而丢失。
+- 驱动按**扫描码**发送，扩展键必须带 `E0`（`Native.IsExtendedKey`，与 SendInput 的 `KEYEVENTF_EXTENDEDKEY` 共用一张表）。漏掉 E0 的后果不是报错而是**静默变成别的键或消失**：`Win` 键漏了 E0 时 `Win + Space`（短按切换输入法）直接失效，这就是一次真实回归。新增「发送按键」可用键时务必确认它是否需要 E0；`Pause` 需要 `E1`，此模型表达不了，`ToKeyStroke` 直接返回 false 让管线回退到 SendInput。
+- `InterceptionSink` 只做「发送」，不做拦截：捕获始终由 `WH_KEYBOARD_LL` / `WH_MOUSE_LL` 负责，Caps 层状态机完全不受注入方式影响。它按扫描码发送（`MapVirtualKey(vk, 0)` + 扩展键的 `E0` 位），没有 Unicode 通道，所以文本仍由 `SendInput` 打；`interception.dll` 缺失、位数不符或驱动未安装时探测失败，错误文字显示在状态栏。
+- **三个线程各管一段**（`DispatcherThread.cs`：STA + 自己的消息循环 + 锚点 `Control`）：①**钩子线程**装 `WH_KEYBOARD_LL`/`WH_MOUSE_LL`，只跑 Caps 层状态机（回调运行在安装它的线程上，系统要等它返回才放行事件；以前装在 UI 线程，UI 一忙注入就被压住——实测 UI 忙 50ms 时按键要 65–78ms 才到目标）；②**输入线程**跑 `ActionExecutor` 与 `MacroRunner`，串行注入、等送达、驱动步骤节奏；③**UI 线程**只做展示。钩子回调不发送输入也不等待；需要发键的（修饰键回收、短按动作）直接调 `InputPipeline`（不等待，不会自锁）；需要 UI 的（坐标抓取、状态栏、宏状态）经 `HotkeyManager.UiPost` / `UiHost` 派回主窗；`ActionExecutor` 用 `Post`（自己的锚点）接收按住类事件。新增回调或动作时先问一句：它必须在哪条线程上跑？
+
+- **桌面注入只剩一条线程干活，鼠标动作靠“等送达 + 下一拍”拆成两半**：驱动把键盘与鼠标写到两条独立的设备栈，跨设备顺序本来没有保证；更关键的是本程序的低级键盘钩子由 UI 线程服务，UI 线程一忙，注入的键盘笔画就出不去。QPC 实测（目标为独立进程）：UI 线程空闲时键盘 3.3 ms、鼠标 2.8 ms；UI 线程忙 50 ms 时键盘 65–78 ms、鼠标仍 1–3 ms——这就是「后面的点击反而先到」的全部原因（早期用 `Environment.TickCount` 量出的「键盘 16–31 ms」是 15.6 ms 计时粒度的假象，驱动本身没有这段延迟）。
+- 因此**不要**把动作交给第二个线程执行（试过：修饰键顺序对了，但步骤之间互相超车，宏还会在自己的最后一次点击落地前就宣布结束、并先把光标还原）。现在的规矩是：
+  - 所有注入仍在**同一条线程**（UI 线程）上按步骤串行发出，`SendInput` 的批次顺序天然保留；
+  - 带修饰键的鼠标动作拆成两拍：先在当前这一拍按下修饰键，鼠标事件交给 `ActionExecutor` 的 `_pending` 队列；泵定时器（有待办时把间隔降到 1 ms）在**账本里没有未认领笔画**时才发鼠标事件 —— 也就是修饰键真的到了目标之后。队列上限 `DeliveryWindowMs` 超时兜底，钩子停掉也不会卡死；
+  - 修饰键必须**覆盖整个点击**，不只是“先到”：点击抬起与修饰键抬起走两条设备栈，谁先到不确定；`HoldModifiersAfterClick` 用 `InputPipeline.WaitMouseState` 等按键状态真的变成抬起，再补 `ModifierHoldMs` 的兜底，然后才松开修饰键。目标端顺序因此稳定为 `Ctrl↓ → 点击↓(Ctrl) → 点击↑(Ctrl) → Ctrl↑`。
+  - `Busy` 同时覆盖「队列非空」与「自己还有笔画未被认领」，`MacroRunner` 用它当步骤栅栏，**并且宏结束前也要等它**（否则光标会先还原、最后一次点击才落地——这是一次真实故障），延时从这一步真正结束的时刻开始计算；
+  - 新增注入路径时：不要另起线程，也不要用固定 sleep 代替「等账本清空」。
+- **鼠标声明只在鼠标钩子在位时才记**（`SyntheticLedger.MouseClaimsActive`）：Caps 松开后鼠标钩子会卸载，此时没有任何东西能认领鼠标笔画；留着声明会在 2 秒内把用户自己的点击认领成「本程序发的」，也会让送达栅栏一直等到超时。
+- `SyntheticLedger` 是驱动后端的配套：驱动注入发生在 `dwExtraInfo` 之下，钩子看到的事件与真实硬件无异。每次发送前记一条声明（FIFO 匹配、约 2 秒过期）用于识别「自己发的」；另按「当前按住的键」记一条按住记录，释放时只把它标成「已发出释放」，等这条释放真的被消费掉才清掉（另加 1 秒兜底，防止注入丢失后永久认领）。没有定时尾巴：曾经用 150ms 尾巴接住仍在队列里的重复，结果把用户「快速再按一次同一个键」也一起吃掉了。
+- 两条铁律，改动这块时不要破：**抬起永不认领**——本程序发出的每个抬起都已登记，没登记过的抬起就是用户在松手，必须进入状态机结束 hold（曾经在这里把物理抬起当成了自己的事件，结果松掉主键后动作一直重复到松 Caps）；**重复的下压不当作新组合键**——按住记录只用来标记「这个键是我按住的」，由 `OnHookKey` 在 `_swallowedKeys` 之后调用 `IsHeldRepeat` 吞掉，且只在该键不是用户仍按着（`wasDown`）时生效。过期与回退（`Forget`）都要配对清理按住记录，否则一次失败的发送会永久吃掉那个真实按键。
+- 自检覆盖：`a physical key-up is never claimed by a held key`、`a held key is reported, not booked, on its repeats`、`the physical key-up still ends a driver hold`、`a repeat left in flight does not restart the hold`。
 
 ### 插件
 
@@ -239,90 +265,3 @@ public string TriggerMode { get; set; } // "once" 或 "hold"
 - 插件动作通过 `PluginDispatcher` 在专用 STA 线程执行（有消息循环，支持 WinForms/剪贴板）；`PluginRuntime.Dispatch` 只入队，不阻塞键盘钩子/UI 线程。重载/卸载前调用可选的 `IPluginLifecycle.Shutdown()`，并尝试 `IDisposable.Dispose()`；卸载已加载插件时 UI 会退出程序，确保代码停止。
 - 编译使用系统 `csc.exe` 直接进程（不经过 `cmd.exe`），超时 30 秒；忽略 `CSC` 环境变量覆盖。
 - 「卸载」会删除插件源文件与它自己的目录（`plugins\<id>\`），且只在该目录确实位于插件根下、名字等于插件 Id 时才递归删除；否则只删源文件。
-- `IPluginHosted.Initialize(PluginHostInfo)` 在实例创建后、`CreateActions()` 前调用，把 `DataDirectory` 交给插件；插件自己的配置文件因此与源码同目录。
-- 拖放：WinForms 里每个子控件各自有窗口，只在窗体上设 `AllowDrop` 收不到落在子控件上的文件；`AttachDropTargets` 递归给所有子控件挂 `DragEnter`/`DragDrop`，并在每次 `BuildShell()` 之后重新挂（控件树会被重建）。
-- 压缩包只取文件名（防路径穿越），单文件上限 512 KB、最多扫描 500 条；同名文件覆盖，同名候选跳过。
-- 新增 `ActionParamKind` 要同步三处：`MappingEditorForm.BuildParamArea`、`ActionCatalog.Describe`、`PLUGIN.md` 的参数表。
-- 插件设置页走**可选接口**：`IPluginWithSettings` / `IPluginSettingsPage` / `IPluginSettingsContext`。不要给 `IPlugin` 加成员，否则所有旧插件编译失败。
-- 宿主侧：`MainFormPlugins.OpenPluginSettings` 建二级页面，用 `MScrollPanel` 承载（自绘滚动条；不要用 `AutoScroll`，否则会露出系统滚动条）；`ClosePluginSettings` 负责保存与销毁视图；重载、导入、卸载前必须先关闭设置页。列表行的双击 / `Enter`（`ItemActivated`）直接进设置页，没有设置页时给状态提示；插件详情、信任、卸载只放在右键菜单里（`ShowPluginMenu`），信任在无可信任文件时保持可见但置灰（`MPopupMenu.AddItem(..., bool enabled)`）。
-- 设置持久化在 `PluginSettingsStore`（`plugins\<插件 Id>\settings.json`），只在 `Set` 过之后才写盘；`PluginRuntime.DataDirectoryOf` 负责定位插件实际所在目录。
-
-### 宏动作
-
-宏动作把多个内置动作、插件动作以及其他宏串成一段顺序脚本。它是普通动作的一种：ID 为 `macro.<宏 Id>`，由 `ActionCatalog.RegisterMacros` 注册，因此绑定、动作选择器、冲突检测、快捷键列表都无需特判。
-
-- 数据模型见 `Models.cs`：`Macro { Id, Name, Note, List<MacroStep> Steps }`，`MacroStep { Action, Param, Note, DelayMs = 50, Count = 1 }`；`MacroStep.Note` 是用户在步骤编辑框里起的名字（可空，归一化时 trim 并截到 60 字），只影响列表显示，不参与执行。`ConfigStore.NormalizeMacroList` 负责修复外部文件（空 Id / 重名 Id / 空名字 / 空动作 / 越界的延迟与次数），配置版本因此升到 4。
-- 宏文件是纯 JSON（`.clmacro`），一个文件可放多个宏；读写都在 `Macros.cs` 的 `MacroFileStore`，写入用 `JsonPretty` + 无 BOM 的 UTF-8。文件不含任何 `.cs` 代码，因此导入不需要信任流程。
-- 执行器 `MacroRunner` 用**帧栈**而不是展开：每个 `Frame` 记录当前宏、步号、这一步剩余次数与下一次可执行的时刻。这样「宏里嵌套宏、嵌套的宏又被重复 999 次」也只占常数内存。每一步执行完等 `DelayMs`，`Count` 是这一步重复几次；嵌套宏跑完后父帧再等自己的 `DelayMs`。
-- 安全阀：启动前 `MacroLibrary.ValidateNesting` 递归检查循环与深度（`MaxNesting = 8`）；运行时帧栈最多 16 层、整次运行最多 10000 步，超限自动停止并给状态提示。
-- `ActionExecutor` 的默认分支先看 `ActionCatalog.IsMacroActionId`，命中就调用 `MacroStartHook`（由 `MainForm` 指向 `StartMacroFromAction`），不会落到插件分发；`ExecuteAction(action, param)` 让运行器复用同一套动作实现。
-- 单实例运行：`MacroRunner.Start` 在 `IsRunning` 为真时直接返回 false（错误文本「宏“X”正在运行，结束后才能触发下一个宏。」），不再先 `Stop` 当前运行；`MainFormMacros.StartMacroFromAction`（快捷键触发）与 `RunSelectedMacro`（页面「运行」）都先判断并给状态提示，想换宏必须点「结束运行」。嵌套宏不经过这条路径——运行器在 `OnTick` 里自己 push `Frame`，所以子宏照常执行。
-- 编辑页 `MacroEditorForm` 复用 `MListView` 的多选与拖动排序：`Ctrl+X/C/V` 针对步骤列表做剪切/复制/粘贴（也可从行右键菜单触发），剪贴板是进程内的 `List<MacroStep>` 深拷贝；工具栏只留「添加动作… / 编辑… / 删除」，`ProcessCmdKey` 让 `Esc` 取消、`Ctrl+S` 保存。**列表只负责显示顺序**：`ItemsReordered` 与保存前都会调用 `SyncStepsFromList()`，用 `MacroLibrary.ApplyStepOrder()` 把行顺序写回 `_draft.Steps`（列表没覆盖到的步骤按原顺序保留，绝不丢步），否则拖完再保存会回到旧顺序。
-- 步骤编辑有独立的撤回栈（`StepSnapshot { List<MacroStep> Steps; string Label }`，上限 50）：每个改动入口先 `PushStepUndo(label)` 再改，`Ctrl+Z` / `Ctrl+Y` 走 `UndoSteps`/`RedoSteps`，右键菜单同样有「撤回 / 重做」；焦点在名称或备注输入框时 `ProcessCmdKey` 直接放行，让文本框保留自己的撤消。撤回只回滚步骤，不碰宏名、备注与运行状态。
-- 步骤编辑框 `MacroStepForm` 的高度是量出来的：命名行、动作行、参数行、按 `MTextLayout.Wrap` 计算行数的说明、时间行依次递推，换动作时重新跑 `LayoutRows`；命名行复用同一套「标签 + 控件」布局（标签 `S(60)`、输入框从 `S(80)` 起），并排在卡片最上方——它只是给这一步取个显示名，`MacroStep.Note` 归一化时截到 60 字，`MacroStepListItem` 有名字时动作列只画这个名字（`BodyStrong`），名字取代动作描述而不是叠成两行，参数列仍显示参数；参数行与「编辑快捷键」动作卡片同构（说明列 `S(16)`、控件从 `S(80)` 起、右侧留 `S(16)`，路径/文件夹带 `浏览…`，组合键与快捷键页共用同一个内联 `MKeyComboField`（四个修饰键开关 + 按键捕获 + 实时预览），不再弹二级对话框，文本用 `MTextArea` 96 高），插件说明再长也不会压住参数控件。
-- `MNumberBox` 点入后第一次按键替换旧值、后续数字追加（早期实现每按一位就 `CommitEdit`，两位数字只剩最后一位）；`Step` 用 `Increment` 步进，等待框 25ms、次数框 1；Enter 在框内只提交并让出焦点（`IsInputKey` 放行 Enter，`Owner.ActiveControl = null`），窗体层 `ProcessCmdKey` 必须把焦点在 `MNumberBox` 上的 Enter 原样放行，否则对话框会直接关闭。
-- 页面 `MainFormMacros`：列表按 Id 保持选择，运行中的宏显示「运行中」胶囊，`运行 / 结束` 两个按钮由 `MacroRunner.StateChanged` 驱动。导入/导出走 `SaveFileDialog`/`OpenFileDialog`，导出单个或全部。
-
-### 状态提示
-
-`IAppHost.ShowStatus` 只有 `(string, MInfoSeverity)` 与 `(string, bool error)` 两个重载，严重度由调用方给出，不再按中文关键字猜（插件用英文上报也不会被误判成成功）。`HotkeyManager.StatusChanged` 同样带严重度。
-
-### 配置
-
-默认位置：
-
-```text
-%APPDATA%\CapsLockLite\settings.json
-```
-
-不可写时依次回退到 `%LOCALAPPDATA%\CapsLockLite`、当前用户临时目录；不再使用 exe 同目录或 `CAPSLOCKLITE_DATA_DIR` 重定向。日志为同目录 `error.log`。
-
-`ConfigStore.Save` 使用随机临时文件 + `File.Replace`（不支持时退回复制），避免崩溃时留下半截配置。
-
-`ConfigStore.Normalize` 不再丢弃没有主键的映射（保留并显示“未设置”），`MappingConflicts` 也会跳过它们。
-
-窗口尺寸：
-
-- `WindowWidth` / `WindowHeight` / `WindowMaximized` 记住用户拖动后的窗口。默认值是 `min(1160×780, 工作区 82%)`，避免在 1366×768 这类屏幕上开到桌面外；读数超出合理范围时按「没设置」处理。
-- 只有用户真的改过尺寸才写盘：`Resize` 后 700ms 防抖再 `SaveQuiet`；最小化时跳过，最大化时只记 `WindowMaximized`、保留上一次的还原尺寸。`--demo=`（仅 DEBUG 构建）运行时不写入，免得截图污染配置。
-- `ConfigVersion` 升到 3（v2 的 F1 迁移仍保留）：`MigrateToVersion2` 把「没有被改过的默认 Caps+F1 → `system.help`」换成 `system.show`，用户自己改过的 F1 保持原样。以后改默认键位都走这个开关，不要去改 `Normalize` 里的默认值。
-
-### 开机启动
-
-优先写：
-
-```text
-HKCU\Software\Microsoft\Windows\CurrentVersion\Run
-```
-
-失败时尝试启动文件夹 `CapsLock Lite.cmd`。如果运行在沙盒、受限启动器或安全软件拦截环境中，系统会拒绝这些写入；程序会关闭开关并提示，而不会假装成功。
-
-### 系统计算器
-
-`system.calc` 直接启动 `calc.exe`，失败时尝试 `ms-calculator:`，不再包含自制计算器。
-
-### 页头与侧栏
-
-「启用」总开关是全局状态，挂在左侧栏顶部的 Logo 上（`MLogo`，同时是品牌标记）：`_logo.Click` 调 `SetEnabled(!_settings.Enabled)`，停用只改 `_logo.Dimmed = true`，由 `MLogo` 用 `ColorMatrix`（0.299/0.587/0.114 亮度，整体 alpha 0.55）缓存浅色版和深色版各一份灰化位图；切换主题会重建控件树，`UpdateStatusUi` 里要回填 `Dimmed`，否则暂停状态能看见而 Logo 还亮着。不要逐页放到内容区右上角，也不要再加单独的开关控件。快捷键页的右上角是预设控件：`BuildPresetBar(_content)` 把控件挂到内容区，`LayoutPresetBar(w, pad)` 右对齐排布（预设按钮 200、新建预设 88、下方 300 宽右对齐的前台提示），`LayoutContent` 只在快捷键页为它预留标题宽度。`SwitchPage` 负责显隐（`UpdatePresetBarVisibility`）并在 `_shellReady` 之后重跑 `LayoutContent`：构造期内容面板还是 150×150 的占位尺寸，提前排版会让列表按小视口算出错误的滚动位置（表现为首行被页头切掉一半）。主题切换走 `RebuildUi` 时同理：重建控件树前先把 `_shellReady` 置为 false，`BuildShell()` 之后立刻 `LayoutShell()`，再 `SwitchPage` / `RefreshList`；否则旧的 `_shellReady = true` 会让新页面按占位尺寸排一次版，切完主题列表首行就被页头切掉（同一个坑，1.18.1 修）。侧栏分页按钮不写死坐标：`PositionSidebarFooter` 里 `navTop = Math.Max(S(96), _statusLabel.Bottom + S(14))`，然后 `_navKeys/_navSettings/_navMacros/_navPlugins/_navAbout` 依次排在 `navTop + i * S(44)`，x 仍是 `S(12)`；状态指示的文字一变长，分页按钮就整体下移，不会再贴着「● 运行中」。`MLogo` 的立体感全在 `OnPaint`：投影（`_pressed` 时去掉）、`Theme.Rounded` 裁剪后画 Logo、全高 `LinearGradientBrush` 白色高光（`ColorBlend` 三段：62 白 → 0 白，0.55 处收尾）、hover 的白色 16 罩层、按下时的黑色 34 罩层、`StrokeRound` 内描边；高光必须填满整个 tile。只填上半截时 Brush 的平铺接缝会在分界处画出一条 1px 灰线（1.18.1 的 Logo 中线就是它），而 `LinearGradientBrush.WrapMode = Clamp` 会直接抛「参数无效」，只能靠全高渐变 + 多段 `ColorBlend` 解决。按下同时把图形整体下移 `S(2)`（`lift`），指针进/出/下/上只改 `_hover/_pressed`，不 `Focus()`、不写配置。`MButton` 画文字要带 `SingleLine | EndEllipsis | NoPrefix`，左右各留 `S(8)` 内边距，长预设名才会省略而不是被边框裁掉；焦点环只在 `Focused && Enabled && ShowFocusCues` 时画，鼠标点完不留高亮。预设菜单是非模态的 `MPopupMenu`，关闭后焦点会回落到触发按钮，所以在 `ShowPresetMenu` 里挂 `menu.FormClosed` 把焦点交给 `_list`，否则按钮上会一直留一圈高亮。侧栏品牌区：Logo 在 `(S(22), S(22))`、`S(38)` 见方，标题在 `(S(71), S(28))`，副标题 `_tagline` 在 `(S(71), S(44))` 且 `AutoSize`；运行状态指示不占页脚，`_statusLabel.Location = new Point(_tagline.Left, _tagline.Bottom + S(4))`，在 `PositionSidebarFooter` 里定位。侧栏页脚只剩版本号：`versionY = h - S(36)`、左边缘 `S(24)`，定位前用 `TextRenderer.MeasureText` 实测宽度——`MakeLabel` 给的是统一占位宽（版本号原来占 `S(160)`），不实测会把它顶出栏外。页脚里所有 Label 都按实测宽度摆放；本条的教训是：任何「紧跟另一个 Label」的控件都必须先量窄被跟随者。
-
-## 发布
-
-1. 更新 `src\AssemblyInfo.cs` 和界面版本号。
-2. 运行 `build.ps1`。
-3. 运行 `--selftest`。
-4. 运行 `package.ps1` 生成发布包/源码包；**不要打包 `preview\` 或任何截图**。
-5. 如需重建图标：
-
-```powershell
-python assets\make_final_icon.py
-```
-
-图标脚本需要 Pillow，并以 `assets\logo-option-1.png` 为源图。
-
-`input.keys` 从 1.14.2 起支持可选注释：`KeyMapping.Note`（最长 40 字，归一化时裁剪，非 `input.keys` 的行会清空）。`ActionCatalog.Describe(KeyMapping)` 是列表行的唯一入口——有注释显示注释，没有注释显示组合串，都没有才显示「发送按键」；`ActionCatalog.Describe(id, param)` 对 `input.keys` 也返回裸组合串，供宏步骤等没有注释的场合使用。旧动作迁移时会把动作名写进注释（`KeySendPreset.Note`，如 `clipboard.copy → 复制`、`move.up → 上移`），这样十几个迁移过来的行仍然一眼能认。
-
-快捷键编辑页的「发送按键」参数改用 `MKeyComboField`（`ModernInputs.cs`）：四个 `MChipToggle` 修饰键 + `MKeyCapture` 主键 + 实时预览，全部内联在参数区，`SendKeysDialog` 已随之删除（1.14.5 起宏步骤编辑框的「组合键」参数也换成了同一个控件）；下面一行的「注释」只对 `input.keys` 显示。`ParamHostHeight(KeyCombo)` 因此是 78，带注释时 118。`MKeyCapture` 的 `IsInputKey` 把 Tab、Esc 与 ↑↓←→ 都声明为输入键，并在 `ProcessCmdKey` 里先一步把 Esc 和方向键记进 `KeyCode`——否则对话框会先拿 Esc 当取消、方向键会被当成焦点导航，这五个键就永远录不进主键框（对话框侧的 Escape 分支用 `MKeyCapture.AnyFocused(this)` 判断焦点是否真在捕获框里，在才放行）。方向键 `move.up/down/left/right` 也已从 `ActionCatalog` 和 `ActionExecutor` 删除，迁移表把它们映射到 `Up/Down/Left/Right`；依赖它们的默认项（上移 ×3/×10/×30、下移 ×10/×30、左移 ×5、右移 ×5）一并删除，`CreateDefaultMappings` 里只保留 `Caps + E/D/S/F` 四条单发。
-
-注释的作用范围由 `ActionCatalog.SupportsNote(action)` 决定：只有 `input.keys` 与 `mouse.click` 返回 true——它们的参数本身是裸输入（组合键、坐标），没有名字可显示；`ConfigStore.Normalize` 会清掉其他动作残留的 `Note`。`Describe(KeyMapping)` 对有注释的行一律先返回注释，再按旧规则回退。
-
-编辑快捷键的保存路径改成了整体回写：`KeyMapping.CopyFrom(other)` 复制全部字段，`MainForm.EditMapping` 不再逐字段赋值。此前 `Note` 就是在逐字段复制里被漏掉的（同样的坑还漏过宏的 `RestoreCursor`），以后新增字段只需要改 `CopyFrom`。自检里有「copy-back keeps the note」与「normalise keeps notes only where they are shown」两条看住它。鼠标点击的编辑页参数区高度 146，带注释时 186（`ParamHostHeight`；控件本身 112，多出的是注释行与间距）。

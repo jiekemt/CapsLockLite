@@ -453,6 +453,9 @@ namespace CapsLockLite
                     string held = point.ModifierText;
                     return name + "：" + (held.Length == 0 ? "" : held + " + ")
                         + point.ButtonName + " (" + point.X + ", " + point.Y + ")";
+                case ActionParamKind.MousePoint:
+                    MouseClickPoint target = MouseClickPoint.Parse(param);
+                    return name + "：(" + target.X + ", " + target.Y + ")";
                 case ActionParamKind.Select:
                     if (string.IsNullOrEmpty(param)) return name;
                     return name + "：" + Shorten(def.ChoiceLabelOf(param), 20);
@@ -505,6 +508,11 @@ namespace CapsLockLite
                     return "";
                 case ActionParamKind.MouseClick:
                     return MouseClickPoint.Format(MouseClickPoint.Parse(param));
+                case ActionParamKind.MousePoint:
+                    {
+                        MouseClickPoint point = MouseClickPoint.Parse(param);
+                        return point.X + ";" + point.Y;
+                    }
                 case ActionParamKind.Select:
                     {
                         // A stored value that the plugin no longer offers is kept as
@@ -564,7 +572,10 @@ namespace CapsLockLite
             a.Add(new ActionDef("input.text", launch, "输入文本", "向当前窗口输入一段文本（支持中文）。", ActionParamKind.Text, "", false));
             a.Add(new ActionDef("input.keys", launch, "发送按键", "向当前窗口发送自定义组合键，也可以是鼠标左键/右键/中键或滚轮上下。点按键框后按一个主键，修饰键由上方开关决定。", ActionParamKind.KeyCombo, "", true));
 
-            a.Add(new ActionDef("mouse.click", mouse, "鼠标点击",
+            a.Add(new ActionDef("mouse.move", mouse, "鼠标移动",
+            "把光标移动到指定坐标，只移动、不点击。需要“悬停才展开菜单”的界面，用它加一步，再给下一步设置等待时间来充当悬停时长。",
+            ActionParamKind.MousePoint, "0;0", false));
+        a.Add(new ActionDef("mouse.click", mouse, "鼠标点击",
                 "在指定坐标点击一次。点「抓取坐标」后窗口会隐藏，按下 CapsLock 记录鼠标位置（Esc 取消）。",
                 ActionParamKind.MouseClick, "L;0;0", false));
 

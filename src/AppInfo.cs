@@ -1,4 +1,4 @@
-﻿namespace CapsLockLite
+namespace CapsLockLite
 {
     /// <summary>
     /// Single source for the version the user sees. Two places cannot read this
@@ -8,15 +8,15 @@
     /// </summary>
     internal static class AppInfo
     {
-        public const string Version = "1.25.2";
+        public const string Version = "1.26.1";
 
-        /// <summary>Sidebar / title bar style: "v1.25.2".</summary>
+        /// <summary>Sidebar / title bar style: "v1.26.1".</summary>
         public static string VersionText
         {
             get { return "v" + Version; }
         }
 
-        /// <summary>Sentence style used on the about page: "版本 1.25.2".</summary>
+        /// <summary>Sentence style used on the about page: "版本 1.26.1".</summary>
         public static string AboutVersion
         {
             get { return "版本 " + Version; }

@@ -4,6 +4,7 @@ using System.IO;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -311,8 +312,15 @@ namespace CapsLockLite
             if (settings.TapAction != "caps" && settings.TapAction != "esc"
                 && settings.TapAction != "none" && settings.TapAction != "ime")
                 settings.TapAction = "caps";
+            if (settings.InputBackend == null) settings.InputBackend = InputPipeline.BackendAuto;
+            if (settings.InputBackend != InputPipeline.BackendAuto
+                && settings.InputBackend != InputPipeline.BackendSystem
+                && settings.InputBackend != InputPipeline.BackendDriver)
+                settings.InputBackend = InputPipeline.BackendAuto;
             if (settings.LongPressMs < 150) settings.LongPressMs = 150;
             if (settings.LongPressMs > 2000) settings.LongPressMs = 2000;
+            if (settings.WheelStep < 40) settings.WheelStep = 40;
+            if (settings.WheelStep > 1200) settings.WheelStep = 1200;
             if (settings.Mappings == null) settings.Mappings = new List<KeyMapping>();
             if (settings.PluginOrder == null) settings.PluginOrder = new List<string>();
             // The order list is a hint, not data: drop blanks and duplicates so a
@@ -521,13 +529,132 @@ namespace CapsLockLite
             return result;
         }
 
+        /// <summary>
+        /// A macro writes one line per step and one per click, so the log grows with
+        /// normal use. Cap it: when the file passes <see cref="MaxLogBytes"/> it is
+        /// moved aside to error.1.log (the previous one is replaced) and a fresh file
+        /// starts. One rotation is enough to keep the current run and the one before.
+        /// </summary>
+        private const long MaxLogBytes = 1024 * 1024;
+
+        /// <summary>
+        /// Lines waiting to be written. A whole macro is a handful of lines, so this
+        /// is only ever large when something is spamming (a failing hook, say).
+        /// </summary>
+        private const int MaxQueuedLines = 4000;
+
+        private static readonly object _logGate = new object();
+        private static readonly Queue<string> _logQueue = new Queue<string>();
+        private static Thread _logThread;
+        private static int _logDropped;
+        private static bool _logWriting;
+
+        /// <summary>
+        /// Queues a log line. This must stay cheap: it is called from the input and hook
+        /// threads, i.e. inside a macro's timing. Writing used to happen right here, and
+        /// a log that had grown to ~2 MB (antivirus re-scanning it on every append) added
+        /// enough delay between the modifier press and the click to make Ctrl+click land
+        /// as a plain click. The line is stamped now; the disk sees it later.
+        /// </summary>
         public static void Log(string message)
         {
             try
             {
-                Directory.CreateDirectory(ConfigDirectory);
                 string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message + Environment.NewLine;
-                File.AppendAllText(LogPath, line, Encoding.UTF8);
+                lock (_logGate)
+                {
+                    if (_logQueue.Count >= MaxQueuedLines)
+                    {
+                        _logDropped++;
+                        return;
+                    }
+                    _logQueue.Enqueue(line);
+                    Monitor.Pulse(_logGate);
+                    if (_logThread != null) return;
+                    _logThread = new Thread(LogWriterLoop);
+                    _logThread.IsBackground = true;
+                    _logThread.Name = "CapsLockLite.Log";
+                    _logThread.Start();
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Writes what is queued, then returns. Used when the app is closing.</summary>
+        public static void FlushLog(int timeoutMs)
+        {
+            long limit = Environment.TickCount + (timeoutMs < 1 ? 1 : timeoutMs);
+            try
+            {
+                while (unchecked(Environment.TickCount - limit) < 0)
+                {
+                    lock (_logGate)
+                    {
+                        if (_logQueue.Count == 0 && !_logWriting) return;
+                    }
+                    Thread.Sleep(5);
+                }
+            }
+            catch { }
+        }
+
+        private static void LogWriterLoop()
+        {
+            StringBuilder batch = new StringBuilder();
+            while (true)
+            {
+                try
+                {
+                    lock (_logGate)
+                    {
+                        while (_logQueue.Count == 0) Monitor.Wait(_logGate, 5000);
+                        while (_logQueue.Count > 0) batch.Append(_logQueue.Dequeue());
+                        if (_logDropped > 0)
+                        {
+                            batch.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
+                                .Append("  （日志过多，丢弃 ").Append(_logDropped).Append(" 行）")
+                                .Append(Environment.NewLine);
+                            _logDropped = 0;
+                        }
+                        _logWriting = true;
+                    }
+                    if (batch.Length == 0)
+                    {
+                        lock (_logGate) _logWriting = false;
+                        continue;
+                    }
+                    WriteBatch(batch.ToString());
+                    batch.Length = 0;
+                    lock (_logGate) _logWriting = false;
+                }
+                catch
+                {
+                    lock (_logGate) _logWriting = false;
+                    Thread.Sleep(200);
+                }
+            }
+        }
+
+        private static void WriteBatch(string text)
+        {
+            try
+            {
+                Directory.CreateDirectory(ConfigDirectory);
+                RotateLogIfNeeded();
+                File.AppendAllText(LogPath, text, Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        private static void RotateLogIfNeeded()
+        {
+            try
+            {
+                FileInfo file = new FileInfo(LogPath);
+                if (!file.Exists || file.Length < MaxLogBytes) return;
+                string backup = LogPath + ".1";
+                if (File.Exists(backup)) File.Delete(backup);
+                File.Move(LogPath, backup);
             }
             catch { }
         }

@@ -1,5 +1,5 @@
-﻿param(
-    [string]$Version = 'v1.25.2',
+param(
+    [string]$Version = 'v1.26.1',
     [string]$Suffix = '',
     [switch]$SkipBuild,
     [string]$OutputDir = 'dist'
@@ -14,6 +14,15 @@ if (-not $SkipBuild) {
 
 $exe = Join-Path $root 'dist\CapsLockLite.exe'
 if (-not (Test-Path $exe)) { throw "Missing executable: $exe" }
+
+# Optional driver backend: the user-mode DLL ships next to the exe so "driver
+# injection" works as soon as the user installs the Interception driver. The
+# kernel driver and its installer are deliberately not bundled (see PACKAGING.md).
+$thirdParty = Join-Path $root 'third_party\interception'
+$driverDll = Join-Path $thirdParty 'x64\interception.dll'
+$driverLicense = Join-Path $thirdParty 'interception-LICENSE-LGPL-3.0.txt'
+if (-not (Test-Path $driverDll)) { throw "Missing third-party driver DLL: $driverDll (see PACKAGING.md)" }
+if (-not (Test-Path $driverLicense)) { throw "Missing third-party license: $driverLicense (see PACKAGING.md)" }
 
 $dist = Join-Path $root $OutputDir
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
@@ -54,6 +63,22 @@ if ($oldZips.Count -gt 0) {
     Write-Output ("Archived previous packages: " + $archiveRoot)
 }
 
+# Fail fast when an existing artifact is still open elsewhere. Deleting the other
+# files first used to leave dist/ half packaged (and the checksum list missing)
+# just because Explorer had a preview of one archive open.
+foreach ($existing in @($releaseZip, $sourceZip, $pluginZip)) {
+    if (-not (Test-Path -LiteralPath $existing)) { continue }
+    try {
+        $probe = [IO.File]::Open($existing, [IO.FileMode]::Open,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $probe.Close()
+    }
+    catch {
+        throw ("Package file is open in another program: " + $existing +
+            ". Close it (Explorer preview, archiver, antivirus) and run package.ps1 again.")
+    }
+}
+
 Remove-Item -LiteralPath $releaseZip -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $sourceZip -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $pluginZip -Force -ErrorAction SilentlyContinue
@@ -68,7 +93,7 @@ $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvari
 # Release package intentionally contains no preview screenshots.
 # It ships PLUGIN.md plus a ready-to-import sample plugin so users can try the
 # plugin system without downloading anything else.
-Compress-Archive -Path $exe, $exeSums, (Join-Path $root 'README.md'), (Join-Path $root 'LICENSE'), `
+Compress-Archive -Path $exe, $exeSums, $driverDll, $driverLicense, (Join-Path $root 'README.md'), (Join-Path $root 'LICENSE'), `
     (Join-Path $root 'PLUGIN.md'), (Join-Path $root 'samples\plugins\screenshot-pro.cs') `
     -DestinationPath $releaseZip -CompressionLevel Optimal -Force
 
@@ -78,6 +103,7 @@ try {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     Copy-Item (Join-Path $root 'src') $stage -Recurse
     Copy-Item (Join-Path $root 'samples') $stage -Recurse
+    Copy-Item (Join-Path $root 'third_party') $stage -Recurse
     New-Item -ItemType Directory -Path (Join-Path $stage 'assets') -Force | Out-Null
     foreach ($name in @('app.ico', 'app-dark.ico', 'logo.png', 'logo-dark.png', 'logo-option-1.png', 'make_final_icon.py')) {
         Copy-Item (Join-Path $root ('assets\' + $name)) (Join-Path $stage ('assets\' + $name))

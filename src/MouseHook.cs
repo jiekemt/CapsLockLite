@@ -85,6 +85,15 @@ namespace CapsLockLite
                     if (data.dwExtraInfo == Native.SyntheticMarker)
                         return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
 
+                    // A pointer action pins the cursor so a moving hand cannot drag it
+                    // away mid-click. Moves on the pinned point (this app's own
+                    // SetCursorPos) are let through; everything else is swallowed.
+                    if (wParam.ToInt32() == Native.WM_MOUSEMOVE)
+                    {
+                        if (!PointerPin.ShouldPass(data.pt.x, data.pt.y)) return new IntPtr(1);
+                        return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
+                    }
+
                     Keys key;
                     bool down, up, wheel;
                     int delta;

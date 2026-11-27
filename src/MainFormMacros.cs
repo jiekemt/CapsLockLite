@@ -264,6 +264,13 @@ namespace CapsLockLite
 
         private void OnMacroStateChanged()
         {
+            // Fired from the input thread (where the runner lives).
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(OnMacroStateChanged)); }
+                catch (InvalidOperationException) { }
+                return;
+            }
             if (_currentPage == "macros") RefreshMacros();
             else UpdateMacroButtons();
         }
@@ -345,21 +352,33 @@ namespace CapsLockLite
                 ShowStatus("宏“" + (_macroRunner.RunningName ?? "当前宏") + "”正在运行，先结束当前宏再运行下一个宏。", MInfoSeverity.Info);
                 return;
             }
-            string error;
-            if (!_macroRunner.Start(macro.ActionId, out error))
+            // The runner lives on the input thread: start it there and report back.
+            MacroRunner runner = _macroRunner;
+            string actionId = macro.ActionId;
+            string name = macro.Name;
+            RunOnInput(delegate
             {
-                ShowStatus(error, MInfoSeverity.Error);
-                return;
-            }
-            ShowStatus("正在运行宏“" + macro.Name + "”", MInfoSeverity.Info);
-            RefreshMacros();
+                string error;
+                if (!runner.Start(actionId, out error))
+                {
+                    string failure = error;
+                    RunOnUi(delegate { ShowStatus(failure, MInfoSeverity.Error); });
+                    return;
+                }
+                RunOnUi(delegate
+                {
+                    ShowStatus("正在运行宏“" + name + "”", MInfoSeverity.Info);
+                    RefreshMacros();
+                });
+            });
         }
 
         private void StopMacro()
         {
-            if (_macroRunner == null || !_macroRunner.IsRunning) return;
-            string name = _macroRunner.RunningName;
-            _macroRunner.Stop();
+            MacroRunner runner = _macroRunner;
+            if (runner == null || !runner.IsRunning) return;
+            string name = runner.RunningName;
+            RunOnInput(delegate { runner.Stop(); });
             ShowStatus("已结束宏“" + (name ?? "当前宏") + "”", MInfoSeverity.Info);
             RefreshMacros();
         }
@@ -562,24 +581,38 @@ namespace CapsLockLite
             BeginInvoke(new Action(delegate { menu.ShowBelow(_macroMoreButton, true); }));
         }
 
+        /// <summary>
+        /// Called by the executor, so this already runs on the input thread: the runner
+        /// is started here, and only the UI feedback is marshalled back.
+        /// </summary>
         private bool StartMacroFromAction(string actionId)
         {
-            if (_macroRunner == null) return false;
+            MacroRunner runner = _macroRunner;
+            if (runner == null) return false;
             // Already running one: ignore the new trigger instead of stopping the
             // current run or stacking a second one on top of it.
-            if (_macroRunner.IsRunning)
+            if (runner.IsRunning)
             {
-                ShowStatus("宏“" + (_macroRunner.RunningName ?? "当前宏") + "”正在运行，结束后才能触发下一个宏。", MInfoSeverity.Info);
+                string busy = runner.RunningName ?? "当前宏";
+                RunOnUi(delegate
+                {
+                    ShowStatus("宏“" + busy + "”正在运行，结束后才能触发下一个宏。", MInfoSeverity.Info);
+                });
                 return false;
             }
             string error;
-            if (_macroRunner.Start(actionId, out error))
+            if (runner.Start(actionId, out error))
             {
-                if (_currentPage == "macros") RefreshMacros();
-                else ShowStatus("正在运行宏“" + _macroRunner.RunningName + "”", MInfoSeverity.Info);
+                string started = runner.RunningName;
+                RunOnUi(delegate
+                {
+                    if (_currentPage == "macros") RefreshMacros();
+                    else ShowStatus("正在运行宏“" + started + "”", MInfoSeverity.Info);
+                });
                 return true;
             }
-            ShowStatus(error, MInfoSeverity.Error);
+            string failure = error;
+            RunOnUi(delegate { ShowStatus(failure, MInfoSeverity.Error); });
             return false;
         }
     }

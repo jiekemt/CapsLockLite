@@ -20,6 +20,11 @@ namespace CapsLockLite
         private int _aboutHeight = 430;
         private int _rowHeight = 64;
         private int _dataHeight = 218;
+        // Content height of the two plain cards. Measured while building instead of
+        // hardcoding "two rows": the behavior card gained a third row and a fixed
+        // multiple would have clipped it without any warning.
+        private int _appearanceHeight;
+        private int _behaviorHeight;
 
         // Safe distances: every vertical gap is explicit so nothing can overlap.
         private const int RowPadTop = 10;
@@ -135,6 +140,7 @@ namespace CapsLockLite
             _accentSwatch.BackColor = Theme.Accent;
             y = AddRow(card, "强调色", "跟随 Windows 系统强调色，用于按钮与选中状态。", _accentSwatch, y);
 
+            _appearanceHeight = y;
             return card;
         }
 
@@ -192,6 +198,73 @@ namespace CapsLockLite
 
             y = AddRow(card, "长按判定", "按住超过该时长且未按其它键，不触发短按动作。", numericHost, y);
 
+            // Wheel sensitivity: how many units one wheel-shortcut action needs.
+            // Windows counts a standard notch as 120; smaller values make a wheel that
+            // sends finer steps fire once per physical notch.
+            // Same footprint as the long-press row above, so both numbers sit on the
+            // same right edge; a wider host would push its contents further left.
+            Panel wheelHost = new Panel();
+            wheelHost.BackColor = Color.Transparent;
+            wheelHost.Size = new Size(Theme.S(140), Theme.S(32));
+
+            _wheelStep = new MNumberBox();
+            _wheelStep.Minimum = 40;
+            _wheelStep.Maximum = 1200;
+            _wheelStep.Increment = 40;
+            _wheelStep.SetBounds(0, 0, Theme.S(84), Theme.S(28));
+            _wheelStep.ValueChanged += delegate
+            {
+                if (_syncing) return;
+                _settings.WheelStep = _wheelStep.Value;
+                SaveQuiet();
+            };
+            wheelHost.Controls.Add(_wheelStep);
+
+            Label wheelUnit = Theme.MakeLine("单位", Theme.Caption, Theme.TextTertiary,
+                Theme.S(92), Theme.S(6), Theme.S(44));
+            wheelHost.Controls.Add(wheelUnit);
+
+            y = AddRow(card, "滚轮灵敏度",
+                "滚轮快捷键每累计这么多单位触发一次（这个数字就是一次动作需要的量）。"
+                + "Windows 标准滚轮一格是 120，所以 120 = 滚一格动一次；"
+                + "如果滚好几格才动一次，把它调小（高分辨率滚轮常见 40 一格）。",
+                wheelHost, y);
+
+            _inputBackend = new MComboBox();
+            _inputBackend.Items.Add("自动（有驱动时优先）");
+            _inputBackend.Items.Add("系统注入（SendInput）");
+            _inputBackend.Items.Add("驱动注入（Interception）");
+            int backendWidth = Theme.S(190);
+            for (int i = 0; i < _inputBackend.Items.Count; i++)
+            {
+                int needed = Theme.Measure(_inputBackend.Items[i], Theme.Body).Width + Theme.S(44);
+                if (needed > backendWidth) backendWidth = needed;
+            }
+            _inputBackend.Width = backendWidth;
+            _inputBackend.SelectedIndexChanged += delegate
+            {
+                if (_syncing) return;
+                if (_inputBackend.SelectedIndex == 1) _settings.InputBackend = InputPipeline.BackendSystem;
+                else if (_inputBackend.SelectedIndex == 2) _settings.InputBackend = InputPipeline.BackendDriver;
+                else _settings.InputBackend = InputPipeline.BackendAuto;
+                // Holding keys is released through the old sink first: Apply only
+                // swaps it once the engine is idle.
+                RestartEngine();
+                SaveQuiet();
+                if (InputPipeline.UsingDriver)
+                    ShowStatus("注入方式：驱动（" + InputPipeline.BackendName + "）", MInfoSeverity.Success);
+                else if (_settings.InputBackend == InputPipeline.BackendDriver)
+                    ShowStatus("驱动注入不可用，已回退到系统注入：" + InputPipeline.LastError,
+                        MInfoSeverity.Warning);
+                else if (_settings.InputBackend == InputPipeline.BackendSystem)
+                    ShowStatus("注入方式：系统注入（SendInput）", MInfoSeverity.Info);
+                else
+                    ShowStatus("注入方式：自动（当前为 " + InputPipeline.BackendName + "）", MInfoSeverity.Info);
+            };
+            y = AddRow(card, "注入方式",
+                "驱动注入能让只认原始设备的游戏收到按键（需另装驱动）。", _inputBackend, y);
+
+            _behaviorHeight = y;
             return card;
         }
 
@@ -303,9 +376,11 @@ namespace CapsLockLite
 
         private int CardHeightFor(int section)
         {
-            // Derived from measured content: two rows, plus the config block for section 2.
+            // Measured while building, plus the config block for section 2. The
+            // fallbacks only apply if a card is asked about before it was built.
             if (section == 2) return _dataHeight;
-            return _rowHeight * 2;
+            if (section == 1) return _behaviorHeight > 0 ? _behaviorHeight : _rowHeight * 3;
+            return _appearanceHeight > 0 ? _appearanceHeight : _rowHeight * 2;
         }
 
         private void LayoutSettingsPage()
@@ -363,12 +438,25 @@ namespace CapsLockLite
                     else if (_settings.TapAction == "none") _tapCombo.SelectedIndex = 3;
                     else _tapCombo.SelectedIndex = 0;
                 }
+                if (_inputBackend != null)
+                {
+                    if (_settings.InputBackend == InputPipeline.BackendSystem) _inputBackend.SelectedIndex = 1;
+                    else if (_settings.InputBackend == InputPipeline.BackendDriver) _inputBackend.SelectedIndex = 2;
+                    else _inputBackend.SelectedIndex = 0;
+                }
                 if (_longPress != null)
                 {
                     int value = _settings.LongPressMs;
                     if (value < _longPress.Minimum) value = _longPress.Minimum;
                     if (value > _longPress.Maximum) value = _longPress.Maximum;
                     _longPress.Value = value;
+                }
+                if (_wheelStep != null)
+                {
+                    int value = _settings.WheelStep;
+                    if (value < _wheelStep.Minimum) value = _wheelStep.Minimum;
+                    if (value > _wheelStep.Maximum) value = _wheelStep.Maximum;
+                    _wheelStep.Value = value;
                 }
                 if (_configPath != null)
                     _configPath.Text = PathDisplay.Friendly(ConfigStore.DisplayConfigPath);

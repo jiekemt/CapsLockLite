@@ -13,6 +13,7 @@ namespace CapsLockLite
         public const int WH_KEYBOARD_LL = 13;
         public const int WH_MOUSE_LL = 14;
 
+        public const int WM_MOUSEMOVE = 0x0200;
         public const int WM_LBUTTONDOWN = 0x0201;
         public const int WM_LBUTTONUP = 0x0202;
         public const int WM_RBUTTONDOWN = 0x0204;
@@ -325,6 +326,25 @@ namespace CapsLockLite
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
 
+        /// <summary>
+        /// A sleep that really lasts <paramref name="milliseconds"/>. A plain
+        /// Thread.Sleep(1) waits for the next 15.6 ms tick, which is the difference
+        /// between a macro step costing ~3 ms and 15 ms.
+        /// </summary>
+        public static void SleepPrecise(int milliseconds)
+        {
+            if (milliseconds <= 0) return;
+            TimeBeginPeriod(1);
+            try
+            {
+                Thread.Sleep(milliseconds);
+            }
+            finally
+            {
+                TimeEndPeriod(1);
+            }
+        }
+
         [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
         public static extern uint TimeBeginPeriod(uint milliseconds);
 
@@ -364,11 +384,20 @@ namespace CapsLockLite
             SendMessage(box.Handle, EM_SETCUEBANNER, new IntPtr(1), text);
         }
 
-        private static bool IsExtendedKey(Keys key)
+        /// <summary>
+        /// True when the key is sent with the E0 prefix (KEYEVENTF_EXTENDEDKEY).
+        /// The driver backend sends scan codes only, so a missing E0 makes a key
+        /// arrive as a different key or not at all -- the Windows key, for one,
+        /// silently stopped Win+Space from working.
+        /// </summary>
+        internal static bool IsExtendedKey(Keys key)
         {
             key = key & Keys.KeyCode;
             switch (key)
             {
+                case Keys.LWin:
+                case Keys.RWin:
+                case Keys.Apps:
                 case Keys.Insert:
                 case Keys.Delete:
                 case Keys.Home:
@@ -390,6 +419,17 @@ namespace CapsLockLite
                 case Keys.VolumeUp:
                 case Keys.VolumeDown:
                 case Keys.VolumeMute:
+                case Keys.BrowserBack:
+                case Keys.BrowserForward:
+                case Keys.BrowserRefresh:
+                case Keys.BrowserStop:
+                case Keys.BrowserSearch:
+                case Keys.BrowserFavorites:
+                case Keys.BrowserHome:
+                case Keys.LaunchMail:
+                case Keys.SelectMedia:
+                case Keys.LaunchApplication1:
+                case Keys.LaunchApplication2:
                     return true;
             }
             return false;
@@ -447,30 +487,6 @@ namespace CapsLockLite
                 Up(key);
             }
 
-            public void Combo(Keys key, bool ctrl, bool alt, bool shift, bool win, int repeat)
-            {
-                if (key == Keys.None) return;
-                if (repeat < 1) repeat = 1;
-                if (repeat > 100) repeat = 100;
-
-                if (ctrl) Modifier(VK_LCONTROL, false);
-                if (alt) Modifier(VK_LMENU, false);
-                if (shift) Modifier(VK_LSHIFT, false);
-                if (win) Modifier(VK_LWIN, false);
-                for (int i = 0; i < repeat; i++) Tap(key);
-                if (win) Modifier(VK_LWIN, true);
-                if (shift) Modifier(VK_LSHIFT, true);
-                if (alt) Modifier(VK_LMENU, true);
-                if (ctrl) Modifier(VK_LCONTROL, true);
-            }
-
-            private void Modifier(int virtualKey, bool up)
-            {
-                _inputs.Add(KeyboardInput((ushort)virtualKey,
-                    (ushort)MapVirtualKey((ushort)virtualKey, 0),
-                    up ? KEYEVENTF_KEYUP : 0));
-            }
-
             public bool Send()
             {
                 if (_inputs.Count == 0) return true;
@@ -478,25 +494,6 @@ namespace CapsLockLite
                 uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
                 return sent == inputs.Length;
             }
-        }
-
-        public static bool SendKeyCombo(Keys key, bool ctrl, bool alt, bool shift, bool win, int repeat)
-        {
-            InputBatch batch = new InputBatch();
-            batch.Combo(key, ctrl, alt, shift, win, repeat);
-            return batch.Send();
-        }
-
-        /// <summary>
-        /// Sends a single key transition without pairing it with the opposite one.
-        /// Used to emulate a physically held key: one key-down, repeated key-downs
-        /// for auto-repeat, then a single key-up.
-        /// </summary>
-        public static bool SendKeyState(Keys key, bool up)
-        {
-            INPUT[] one = new INPUT[1];
-            one[0] = KeyInput(key, up);
-            return SendInput(1, one, Marshal.SizeOf(typeof(INPUT))) == 1;
         }
 
         public static bool SendVirtualKey(Keys key)

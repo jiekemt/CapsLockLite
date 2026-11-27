@@ -8,7 +8,7 @@
 
 A lightweight Caps Lock enhancement tool for Windows, inspired by [Capslock+](https://capslox.com/capslock-plus/). Tap **Caps Lock** to toggle caps as usual; hold it and press other keys to move the cursor, select text, delete, copy and paste. Everything is configurable from a graphical UI.
 
-Version **1.25.2**. This is an independent implementation, **not an official Capslock+ release**. It does not include Qbar, WinBind or TabScript.
+Version **1.26.1**. This is an independent implementation, **not an official Capslock+ release**. It does not include Qbar, WinBind or TabScript.
 
 ![Shortcuts page](docs/images/shortcut-page.png)
 
@@ -30,7 +30,7 @@ Version **1.25.2**. This is an independent implementation, **not an official Cap
 
 ## Install
 
-1. Download `CapsLockLite-v1.25.2-win64.zip` from [Releases](https://github.com/jiekemt/CapsLockLite/releases/latest).
+1. Download `CapsLockLite-v1.26.1-win64.zip` from [Releases](https://github.com/jiekemt/CapsLockLite/releases/latest).
 2. Extract and run `CapsLockLite.exe`. It is a single portable executable; no installer is required.
 3. Verify the download against `CapsLockLite-SHA256.txt` in the package if you like.
 4. If the original Capslock+ is also running, quit it first so only one program captures Caps Lock.
@@ -61,6 +61,18 @@ Open the **Shortcuts** page and click **Add**. Pick the modifier chips (`Caps Lo
 The main key can also be a mouse button — **left, right, middle** — or the **wheel (up / down)**. Click the box once to start recording, then press the key or the mouse button; the recording swallows that single input so it cannot click anything else in the dialog. Recording ends after one capture, so the dialog buttons work normally again; click the box again to re-record. Mouse buttons support hold-to-repeat. A wheel notch has no release event, so wheel shortcuts are always single-shot and the trigger mode is locked to **press to fire**.
 
 Shortcuts can be dragged between the keyboard and the mouse card: with a chord selected, drag a cap onto a mouse zone or a zone onto a cap; the target highlights and releasing moves every shortcut on that chord. Conflicting targets ask before overwriting.
+
+## Optional driver backend
+
+Shortcuts are sent with `SendInput`, which desktop programs accept. Games that read raw devices (Raw Input / DirectInput) never see injected events, so a shortcut can do nothing there. CapsLock Lite can send through the [Interception](https://github.com/oblitum/Interception) keyboard/mouse filter driver instead:
+
+1. Install the Interception driver (`install-interception.exe /install`, elevated, then reboot).
+2. The release package already ships the 64-bit `interception.dll` next to `CapsLockLite.exe`; when building from source, copy it from `third_party/interception/x64/`.
+3. Settings → Behavior → **Injection** → **Driver (Interception)**, or keep **Auto** to use the driver whenever it is detected.
+
+The full guide — download, install, enable, verify and troubleshooting, plus how to uninstall — is in [DRIVER-SETUP.md](DRIVER-SETUP.md) (Chinese).
+
+Capture is unchanged: the Caps layer still runs on the low-level hook, only the outgoing strokes take a different path. If the driver or the DLL is missing the app falls back to `SendInput`, says why in the status bar and keeps working. A driver is a kernel component: it needs installing, core isolation may refuse it, and it changes how security software and anti-cheat see the app. Leave the default if you do not need it.
 
 ## Build from source
 
@@ -97,6 +109,8 @@ The plugin contract and samples are documented in [PLUGIN.md](PLUGIN.md) (Chines
 
 - No Qbar / WinBind / TabScript / online translation API.
 - Some games, anti-cheat, remote desktop and security software may block low-level keyboard or mouse hooks; mouse triggers stop working if the mouse hook is refused.
+- Games that read raw device input need the optional driver backend (see above); without it their injected-shortcut events are ignored.
+- The driver backend uses a third-party component: the release package bundles Interception's 64-bit user-mode client library (`interception.dll`, LGPL 3.0, unmodified) with its license text. The kernel driver and its installer are not bundled.
 - Programs running as administrator usually do not receive simulated input from a non-elevated process; run CapsLock Lite as administrator if needed.
 - `F3` sends `Ctrl+C` before opening Bing Translator — avoid it in terminals.
 - The binary is unsigned; see [SECURITY.md](SECURITY.md) for the threat model.

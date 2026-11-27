@@ -61,6 +61,7 @@ namespace CapsLockLite
                 TestPopupMenu();
                 TestListInteraction();
                 TestListSelection();
+                TestMappingClipboard();
                 TestTriggerChip();
                 TestActionRowPlacement();
                 TestReorderMath();
@@ -77,6 +78,14 @@ namespace CapsLockLite
                 TestPluginPackages();
                 TestPluginSettings();
                 TestHook();
+                TestSyntheticLedger();
+                TestDriverHoldRelease();
+                TestRapidTaps();
+                TestExtendedKeys();
+                TestInputPipeline();
+                TestDeliverySignal();
+                TestSwallowedMouseRelease();
+                TestPointerPin();
             }
             catch (Exception ex)
             {
@@ -95,6 +104,9 @@ namespace CapsLockLite
             _log.AppendLine(_failed == 0 ? "RESULT: PASS" : "RESULT: FAIL (" + _failed + ")");
             try { File.WriteAllText(path, _log.ToString(), new UTF8Encoding(false)); }
             catch { }
+            // The log writer is asynchronous; give it a moment so a run does not lose
+            // the last lines it produced.
+            ConfigStore.FlushLog(2000);
             Environment.ExitCode = _failed == 0 ? 0 : 1;
         }
 
@@ -584,6 +596,42 @@ namespace CapsLockLite
                     half && whole && afterHalf == 0 && afterWhole == 1,
                     "afterHalf=" + afterHalf + " afterWhole=" + afterWhole);
                 Check("unbound wheel direction passes through", !otherDirection, "");
+
+                // The checks above ran after Caps went up; hold it again for the rest.
+                keyHook.Invoke(manager, new object[]
+                    { new KeyboardEventArgs(Keys.CapsLock, true, false, false, 0) });
+
+                // A flicked wheel arrives as one message with several notches; every
+                // notch is a real action, so none of them may be dropped.
+                int beforeBurst = fired;
+                mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.WheelUp, true, false, true, false, 8 * 120) });
+                Check("a coalesced burst fires every notch",
+                    fired - beforeBurst == 8, (fired - beforeBurst) + " of 8");
+
+                // Sensitivity: a 40-unit wheel fires per notch when told so.
+                wheelSettings.WheelStep = 40;
+                int beforeFine = fired;
+                mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.WheelUp, true, false, true, false, 40) });
+                Check("the wheel step setting decides when it fires",
+                    fired - beforeFine == 1, (fired - beforeFine) + " of 1");
+
+                // And the default 120 needs three of those notches.
+                wheelSettings.WheelStep = 120;
+                int beforeDefault = fired;
+                for (int i = 0; i < 2; i++)
+                    mouseHook.Invoke(manager, new object[]
+                        { new MouseButtonEventArgs((Keys)MouseKeys.WheelUp, true, false, true, false, 40) });
+                int afterTwo = fired - beforeDefault;
+                mouseHook.Invoke(manager, new object[]
+                    { new MouseButtonEventArgs((Keys)MouseKeys.WheelUp, true, false, true, false, 40) });
+                Check("one standard notch still needs 120 units",
+                    afterTwo == 0 && fired - beforeDefault == 1,
+                    "afterTwo=" + afterTwo + " total=" + (fired - beforeDefault));
+
+                keyHook.Invoke(manager, new object[]
+                    { new KeyboardEventArgs(Keys.CapsLock, false, true, false, 0) });
             }
 
             using (MKeyCapture capture = new MKeyCapture())
@@ -2340,6 +2388,472 @@ public sealed class NoopAction : IPluginAction
                 if (installed) hook.Uninstall();
                 Check("mouse hook install", installed, "Win32=" + hook.LastError);
             }
+        }
+
+        /// <summary>
+        /// A driver backend injects below dwExtraInfo, so its strokes arrive at the
+        /// hooks looking like hardware. The ledger is what keeps the Caps layer from
+        /// swallowing its own output; these are the cases the hooks rely on.
+        /// </summary>
+        private static void TestSyntheticLedger()
+        {
+            SyntheticLedger.Clear();
+            Check("ledger ignores a key it never sent",
+                !SyntheticLedger.Consume(Keys.K, true), "");
+
+            SyntheticLedger.Record(Keys.A, true);
+            SyntheticLedger.Record(Keys.A, false);
+            bool tap = SyntheticLedger.Consume(Keys.A, true) && SyntheticLedger.Consume(Keys.A, false);
+            Check("ledger claims its own tap in order", tap, "");
+
+            // The release of a key this app is holding belongs to the user: every
+            // release we send is booked above, so an unbooked up must reach the Caps
+            // layer. Claiming it used to hide the end of a hold (the key stayed down
+            // in the target until Caps Lock itself was released).
+            SyntheticLedger.Record(Keys.G, true);
+            SyntheticLedger.Consume(Keys.G, true);
+            bool physicalUp = !SyntheticLedger.Consume(Keys.G, false);
+            SyntheticLedger.Clear();
+            Check("a physical key-up is never claimed by a held key", physicalUp, "");
+            SyntheticLedger.Clear();
+            Check("a claimed stroke is not claimed twice",
+                !SyntheticLedger.Consume(Keys.A, true), "");
+
+            // A held key is repeated by the OS, not by us: no entry can predict how
+            // many repeats arrive, so the held record marks the key instead of
+            // booking every stroke.
+            SyntheticLedger.Record(Keys.B, true);
+            SyntheticLedger.Consume(Keys.B, true);
+            Check("a held key is reported, not booked, on its repeats",
+                SyntheticLedger.IsHeldRepeat(Keys.B) && !SyntheticLedger.Consume(Keys.B, true), "");
+
+            SyntheticLedger.Record(Keys.B, false);
+            // Until the release is actually delivered, a repeat queued with the hold
+            // still counts as ours...
+            bool stillMarked = SyntheticLedger.IsHeldRepeat(Keys.B);
+            bool released = SyntheticLedger.Consume(Keys.B, false);
+            Check("a release keeps marking a repeat still in flight", stillMarked, "");
+            // ...and once it lands the key is user input again, with no tail that
+            // could swallow the next fast press.
+            Check("a delivered release stops claiming the key",
+                released && !SyntheticLedger.IsHeldRepeat(Keys.B), "");
+
+            SyntheticLedger.Clear();
+
+            int ttl = SyntheticLedger.TtlMs;
+            SyntheticLedger.TtlMs = 20;
+            SyntheticLedger.Record(Keys.C, true);
+            bool live = SyntheticLedger.IsHeldRepeat(Keys.C);
+            Thread.Sleep(80);
+            bool expired = !SyntheticLedger.IsHeldRepeat(Keys.C) && !SyntheticLedger.Consume(Keys.C, true);
+            SyntheticLedger.TtlMs = ttl;
+            Check("an unmatched claim expires instead of eating a real key", live && expired, "");
+
+            SyntheticLedger.Record(Keys.D, true);
+            SyntheticLedger.Record(Keys.D, false);
+            List<InputStroke> refused = new List<InputStroke>();
+            refused.Add(new InputStroke(Keys.D, true));
+            refused.Add(new InputStroke(Keys.D, false));
+            SyntheticLedger.Forget(refused);
+            Check("a refused batch leaves no claims behind",
+                !SyntheticLedger.Consume(Keys.D, true) && SyntheticLedger.PendingCount == 0,
+                "pending=" + SyntheticLedger.PendingCount);
+            SyntheticLedger.Clear();
+        }
+
+        /// <summary>
+        /// Regression: a driver hold books the key-down it injects. The user's own
+        /// key-up must still reach the Caps layer, otherwise the repeat keeps running
+        /// until Caps Lock is released.
+        /// </summary>
+        /// <summary>
+        /// Row clipboard: copy detaches from the originals, paste creates new ids
+        /// right after the anchor and keeps every editable field.
+        /// </summary>
+        private static void TestMappingClipboard()
+        {
+            KeyMapping a = new KeyMapping();
+            a.KeyCode = Keys.E;
+            a.Action = "input.keys";
+            a.Param = "Up";
+            a.Note = "上移";
+            a.TriggerMode = "hold";
+            a.Ctrl = true;
+            KeyMapping b = new KeyMapping();
+            b.KeyCode = (Keys)MouseKeys.Left;
+            b.Action = "input.keys";
+            b.Param = "Ctrl+C";
+            b.Enabled = false;
+
+            List<KeyMapping> source = new List<KeyMapping>();
+            source.Add(a);
+            source.Add(b);
+            List<KeyMapping> copied = MappingClipboard.Copy(source);
+            Check("row clipboard copies every row",
+                copied.Count == 2 && !ReferenceEquals(copied[0], a) && copied[0].Id == a.Id, "");
+
+            string before = a.Param;
+            a.Param = "changed";
+            bool detached = copied[0].Param == before;
+            a.Param = before;
+            Check("row clipboard is detached from the original", detached, copied[0].Param);
+
+            List<KeyMapping> list = new List<KeyMapping>();
+            list.Add(a);
+            list.Add(b);
+            Check("row paste lands right after the anchor",
+                MappingClipboard.InsertIndex(list, a) == 1, "");
+            Check("row paste falls back to the end without an anchor",
+                MappingClipboard.InsertIndex(list, null) == 2
+                    && MappingClipboard.InsertIndex(list, new KeyMapping()) == 2, "");
+
+            List<KeyMapping> pasted = MappingClipboard.PasteInto(list, 1, copied);
+            Check("row paste inserts both rows in order",
+                list.Count == 4 && pasted.Count == 2
+                    && ReferenceEquals(list[1], pasted[0]) && ReferenceEquals(list[2], pasted[1]),
+                "count=" + list.Count);
+            Check("row paste gives every copy a new id",
+                pasted[0].Id != a.Id && pasted[1].Id != b.Id && pasted[0].Id != pasted[1].Id, "");
+            Check("row paste keeps chord, action, note and trigger mode",
+                pasted[0].KeyCode == Keys.E && pasted[0].Action == "input.keys"
+                    && pasted[0].Param == "Up" && pasted[0].Note == "上移"
+                    && pasted[0].TriggerMode == "hold" && pasted[0].Ctrl
+                    && !pasted[1].Enabled
+                    && (int)pasted[1].KeyCode == MouseKeys.Left,
+                pasted[0].TriggerText + "/" + pasted[1].Key);
+
+            List<KeyMapping> none = MappingClipboard.PasteInto(list, 0, new List<KeyMapping>());
+            Check("an empty row clipboard pastes nothing", none.Count == 0 && list.Count == 4, "");
+        }
+
+        private static void TestDriverHoldRelease()
+        {
+            AppSettings settings = ConfigStore.CreateDefault();
+            settings.TapAction = "none";
+            using (HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero))
+            {
+                MethodInfo handler = typeof(HotkeyManager).GetMethod("OnHookKey",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                List<string> events = new List<string>();
+                manager.HoldStarted += delegate(KeyMapping m) { events.Add("start"); };
+                manager.HoldEnded += delegate(KeyMapping m) { events.Add("end"); };
+                // Keep the self-test away from the real desktop.
+                manager.SendKeyState = delegate(Keys key, bool up) { };
+
+                SyntheticLedger.Clear();
+                handler.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+                bool downSeen = (bool)handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+                // Exactly what InputPipeline books before handing the held key over.
+                SyntheticLedger.Record(Keys.E, true);
+                SyntheticLedger.Consume(Keys.E, true);
+                bool upSeen = (bool)handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+                string held = string.Join(",", events.ToArray());
+                // The executor's release is booked now but has not reached the target
+                // yet: exactly the window a queued repeat can still land in.
+                SyntheticLedger.Record(Keys.E, false);
+                events.Clear();
+                bool lateRepeat = (bool)handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+                string afterRepeat = string.Join(",", events.ToArray());
+                // The release lands, so the key is user input again immediately -- no
+                // timer to wait out before the next real press fires.
+                SyntheticLedger.Consume(Keys.E, false);
+                events.Clear();
+                bool freshPress = (bool)handler.Invoke(manager, new object[] { Key(Keys.E, true) });
+                string afterFresh = string.Join(",", events.ToArray());
+                handler.Invoke(manager, new object[] { Key(Keys.E, false) });
+                handler.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+                SyntheticLedger.Clear();
+
+                Check("the physical key-up still ends a driver hold",
+                    downSeen && upSeen && held == "start,end", downSeen + "/" + upSeen + ":" + held);
+                Check("a repeat left in flight does not restart the hold",
+                    lateRepeat && afterRepeat.Length == 0, lateRepeat + ":" + afterRepeat);
+                Check("a swallowed repeat does not make the next press look repeated",
+                    freshPress && afterFresh == "start", freshPress + ":" + afterFresh);
+            }
+        }
+
+        /// <summary>
+        /// Taps of the same shortcut in quick succession must each fire. The driver
+        /// backend books the keys it sends, and the ledger's release tail must not
+        /// swallow the next press of a key the app itself just sent.
+        /// </summary>
+        private static void TestRapidTaps()
+        {
+            Check("rapid taps fire every time", RapidTaps(Keys.E, "Up", 6), "payload differs");
+            // The awkward case: a shortcut whose action re-sends its own trigger key.
+            Check("rapid taps of a self-sending shortcut fire every time",
+                RapidTaps(Keys.J, "J", 6), "payload equals trigger");
+        }
+
+        private static bool RapidTaps(Keys trigger, string payload, int taps)
+        {
+            AppSettings settings = new AppSettings();
+            settings.TapAction = "none";
+            KeyMapping mapping = new KeyMapping();
+            mapping.Caps = true;
+            mapping.KeyCode = trigger;
+            mapping.Action = "input.keys";
+            mapping.Param = payload;
+            mapping.TriggerMode = "hold";
+            settings.Mappings.Add(mapping);
+
+            using (HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero))
+            {
+                MethodInfo onKey = typeof(HotkeyManager).GetMethod("OnHookKey",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                List<string> events = new List<string>();
+                manager.HoldStarted += delegate(KeyMapping m) { events.Add("start"); };
+                manager.HoldEnded += delegate(KeyMapping m) { events.Add("end"); };
+                manager.SendKeyState = delegate(Keys k, bool up) { };
+
+                bool ctrl, alt, shift, win;
+                Keys sent;
+                if (!KeyText.TryParseCombo(payload, out ctrl, out alt, out shift, out win, out sent))
+                    return false;
+
+                SyntheticLedger.Clear();
+                onKey.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+                for (int i = 0; i < taps; i++)
+                {
+                    // The user presses the shortcut...
+                    onKey.Invoke(manager, new object[] { Key(trigger, true) });
+                    // ...the executor sends the held key, booked and then delivered...
+                    SyntheticLedger.Record(sent, true);
+                    SyntheticLedger.Consume(sent, true);
+                    // ...the user lets go, and the executor releases the key.
+                    onKey.Invoke(manager, new object[] { Key(trigger, false) });
+                    SyntheticLedger.Record(sent, false);
+                    SyntheticLedger.Consume(sent, false);
+                }
+                onKey.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+                SyntheticLedger.Clear();
+                return events.Count == taps * 2;
+            }
+        }
+
+        /// <summary>
+        /// The driver sends scan codes, so every E0 key must carry the extended flag:
+        /// without it the Windows key arrives as nothing and Win+Space (the IME tap)
+        /// silently does nothing.
+        /// </summary>
+        private static void TestExtendedKeys()
+        {
+            Check("windows and menu keys are extended",
+                Native.IsExtendedKey(Keys.LWin) && Native.IsExtendedKey(Keys.RWin)
+                    && Native.IsExtendedKey(Keys.Apps), "");
+            Check("navigation, media and right-hand keys stay extended",
+                Native.IsExtendedKey(Keys.Left) && Native.IsExtendedKey(Keys.Delete)
+                    && Native.IsExtendedKey(Keys.VolumeUp) && Native.IsExtendedKey(Keys.RControlKey), "");
+            Check("ordinary keys are not extended",
+                !Native.IsExtendedKey(Keys.A) && !Native.IsExtendedKey(Keys.Space)
+                    && !Native.IsExtendedKey(Keys.CapsLock) && !Native.IsExtendedKey(Keys.LShiftKey), "");
+
+            ushort code;
+            ushort state;
+            // ToKeyStroke(key, down, ...): down == true is a key-down stroke.
+            bool winStroke = InterceptionSink.ToKeyStroke(Keys.LWin, true, out code, out state)
+                && code == 0x5B && state == 0x02;
+            Check("the driver sends the windows key down with the E0 prefix", winStroke, code + "/" + state);
+
+            bool plainStroke = InterceptionSink.ToKeyStroke(Keys.A, true, out code, out state)
+                && code == 0x1E && state == 0x00;
+            Check("the driver sends an ordinary key down without E0", plainStroke, code + "/" + state);
+
+            bool upStroke = InterceptionSink.ToKeyStroke(Keys.RWin, false, out code, out state)
+                && code == 0x5C && state == 0x03;
+            Check("a right-windows release is up plus E0", upStroke, code + "/" + state);
+
+            // Pause needs E1, which the driver stroke model cannot express: it must
+            // refuse so the pipeline sends it through SendInput instead of turning it
+            // into NumLock.
+            bool pauseRefused = !InterceptionSink.ToKeyStroke(Keys.Pause, true, out code, out state);
+            Check("the driver refuses Pause instead of sending NumLock", pauseRefused, code + "/" + state);
+        }
+
+        private static void TestInputPipeline()
+        {
+            AppSettings settings = new AppSettings();
+            settings.InputBackend = InputPipeline.BackendSystem;
+            InputPipeline.Apply(settings);
+            Check("system backend is SendInput",
+                InputPipeline.BackendName == "SendInput" && !InputPipeline.UsingDriver,
+                InputPipeline.BackendName);
+            Check("system backend never reports an error", InputPipeline.LastError.Length == 0,
+                InputPipeline.LastError);
+
+            settings.InputBackend = "nonsense";
+            ConfigStore.Normalize(settings);
+            Check("an unknown backend falls back to auto",
+                settings.InputBackend == InputPipeline.BackendAuto, settings.InputBackend);
+
+            // Either the driver is installed and takes over, or it is missing and the
+            // pipeline must name the reason while staying on SendInput.
+            settings.InputBackend = InputPipeline.BackendDriver;
+            InputPipeline.Apply(settings);
+            bool consistent = InputPipeline.UsingDriver
+                ? InputPipeline.LastError.Length == 0
+                : InputPipeline.LastError.Length > 0 && InputPipeline.BackendName == "SendInput";
+            Check("driver backend activates or explains the fallback", consistent,
+                InputPipeline.BackendName + " / " + InputPipeline.LastError);
+
+            settings.InputBackend = InputPipeline.BackendAuto;
+            InputPipeline.Apply(settings);
+            Check("auto backend stays silent when no driver is installed",
+                InputPipeline.UsingDriver || InputPipeline.LastError.Length == 0,
+                InputPipeline.LastError);
+
+            AppSettings restore = new AppSettings();
+            restore.InputBackend = InputPipeline.BackendSystem;
+            InputPipeline.Apply(restore);
+        }
+
+        /// <summary>
+        /// The ledger is what tells this app's own strokes apart from the user's when
+        /// the backend injects below dwExtraInfo. Mouse strokes are only booked while
+        /// the mouse hook can claim them: an unclaimed booking would otherwise be
+        /// matched against a real click minutes later.
+        /// </summary>
+        private static void TestDeliverySignal()
+        {
+            AppSettings settings = new AppSettings();
+            settings.InputBackend = InputPipeline.BackendSystem;
+            InputPipeline.Apply(settings);
+            Check("SendInput does not need the ledger", !InputPipeline.TracksDelivery, "");
+
+            SyntheticLedger.Clear();
+            SyntheticLedger.Record(Keys.LControlKey, true);
+            SyntheticLedger.Record(Keys.LControlKey, false);
+            Check("the ledger counts one pending stroke per key and state",
+                SyntheticLedger.PendingStrokes(Keys.LControlKey, true) == 1
+                    && SyntheticLedger.PendingStrokes(Keys.LControlKey, false) == 1
+                    && SyntheticLedger.PendingStrokes(Keys.LMenu, true) == 0,
+                "down=" + SyntheticLedger.PendingStrokes(Keys.LControlKey, true)
+                    + " up=" + SyntheticLedger.PendingStrokes(Keys.LControlKey, false));
+
+            SyntheticLedger.Clear();
+            SyntheticLedger.MouseClaimsActive = true;
+            SyntheticLedger.Record((Keys)MouseKeys.Left, true);
+            SyntheticLedger.Record((Keys)MouseKeys.Left, false);
+            int booked = SyntheticLedger.PendingCount;
+            SyntheticLedger.MouseClaimsActive = false;
+            Check("leaving the mouse-hook scope drops unclaimed mouse strokes",
+                booked == 2 && SyntheticLedger.PendingCount == 0,
+                booked + "->" + SyntheticLedger.PendingCount);
+            Settings_BackToSystem();
+        }
+
+        /// <summary>
+        /// A swallowed Caps+鼠标 press must not stay "swallowed" once one of our own
+        /// releases passes: the two events are indistinguishable, and leaving the
+        /// state set made the app eat its own release, which leaves the target with
+        /// a button that never comes up -- clicks then silently do nothing.
+        /// </summary>
+        private static void TestSwallowedMouseRelease()
+        {
+            AppSettings settings = ConfigStore.CreateDefault();
+            settings.TapAction = "none";
+            settings.Mappings.Clear();
+            KeyMapping click = new KeyMapping();
+            click.Caps = true;
+            click.KeyCode = (Keys)MouseKeys.Left;
+            click.Action = "input.keys";
+            click.Param = "F24";
+            click.TriggerMode = "hold";
+            settings.Mappings.Add(click);
+
+            using (HotkeyManager manager = new HotkeyManager(settings, IntPtr.Zero))
+            {
+                MethodInfo onKey = typeof(HotkeyManager).GetMethod("OnHookKey",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                MethodInfo onMouse = typeof(HotkeyManager).GetMethod("OnHookMouse",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                manager.SendKeyState = delegate(Keys k, bool up) { };
+
+                SyntheticLedger.Clear();
+                onKey.Invoke(manager, new object[] { Key(Keys.CapsLock, true) });
+                bool swallowedDown = (bool)onMouse.Invoke(manager,
+                    new object[] { Mouse((Keys)MouseKeys.Left, true) });
+
+                // Our own click is in flight: its release is booked. The user lets
+                // go of the physical button first, so that event consumes the claim.
+                SyntheticLedger.NoteMouseClick();
+                SyntheticLedger.Record((Keys)MouseKeys.Left, false);
+                bool physicalUpPassed = !(bool)onMouse.Invoke(manager,
+                    new object[] { Mouse((Keys)MouseKeys.Left, false) });
+                // ...and now our own release arrives with no entry left.
+                bool ownUpSwallowed = (bool)onMouse.Invoke(manager,
+                    new object[] { Mouse((Keys)MouseKeys.Left, false) });
+
+                onKey.Invoke(manager, new object[] { Key(Keys.CapsLock, false) });
+                SyntheticLedger.Clear();
+
+                Check("a swallowed mouse press is passed once an own release lands",
+                    swallowedDown && physicalUpPassed && !ownUpSwallowed,
+                    swallowedDown + "/" + physicalUpPassed + "/" + ownUpSwallowed);
+            }
+        }
+
+        /// <summary>
+        /// The pointer pin must let the app's own SetCursorPos through (it lands on the
+        /// pinned point) and swallow a hand moving the cursor away, and it must always
+        /// expire -- a pin that outlives its action would freeze the mouse.
+        /// </summary>
+        private static void TestPointerPin()
+        {
+            PointerPin.Release();
+            Check("no pin lets every move through", PointerPin.ShouldPass(10, 10), "");
+
+            PointerPin.Pin(100, 200, 500);
+            bool own = PointerPin.ShouldPass(100, 200);
+            // No tolerance: a 1 px hand movement is blocked too (SetCursorPos never
+            // reaches the hook, so nothing of ours needs the slack).
+            bool near = !PointerPin.ShouldPass(101, 200);
+            bool away = !PointerPin.ShouldPass(160, 240);
+            int blocked = PointerPin.BlockedCount;
+            int reported = PointerPin.Release();
+            Check("a pin lets the pinned point through and swallows a hand moving away",
+                own && near && away && blocked == 2 && reported == 2,
+                own + "/" + near + "/" + away + " blocked=" + blocked);
+
+            // A release queued by an earlier action must not drop a newer pin.
+            int first = PointerPin.Pin(10, 10, 500);
+            int second = PointerPin.Pin(20, 20, 500);
+            PointerPin.Release(first);
+            bool stillPinned = PointerPin.ShouldPass(30, 30) == false;
+            PointerPin.Release(second);
+            Check("a stale release cannot drop a newer pin", stillPinned && !PointerPin.IsActive, "");
+
+            // Mid-macro the per-action releases are ignored, so the pointer stays put
+            // through the step delays as well.
+            PointerPin.BeginMacro();
+            int macroPin = PointerPin.Pin(40, 40, 500);
+            PointerPin.Release(macroPin);
+            bool heldThroughMacro = PointerPin.IsActive && !PointerPin.ShouldPass(60, 60);
+            PointerPin.Release();
+            Check("a macro keeps the pointer pinned between steps",
+                heldThroughMacro && !PointerPin.IsActive, "");
+            Check("releasing the pin frees the pointer",
+                !PointerPin.IsActive && PointerPin.ShouldPass(160, 240), "");
+
+            PointerPin.Pin(5, 5, 20);
+            Thread.Sleep(60);
+            Check("a pin always expires on its own",
+                !PointerPin.IsActive && PointerPin.ShouldPass(500, 500), "");
+            PointerPin.Release();
+        }
+
+        private static MouseButtonEventArgs Mouse(Keys key, bool down)
+        {
+            return new MouseButtonEventArgs(key, down, !down, false, false, 0);
+        }
+
+        private static void Settings_BackToSystem()
+        {
+            AppSettings restore = new AppSettings();
+            restore.InputBackend = InputPipeline.BackendSystem;
+            InputPipeline.Apply(restore);
+            SyntheticLedger.Clear();
         }
 
         private const string PluginSource = @"

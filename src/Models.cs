@@ -210,6 +210,19 @@ namespace CapsLockLite
 
         public string TapAction { get; set; }
         public int LongPressMs { get; set; }
+
+        /// <summary>
+        /// Wheel units needed for one wheel-shortcut action. Windows counts one
+        /// standard notch as 120, so 120 means "one notch, one action"; a wheel or
+        /// trackpad that sends smaller steps can be set lower to fire per notch.
+        /// </summary>
+        public int WheelStep { get; set; }
+
+        /// <summary>
+        /// Where synthetic input goes: "auto" (driver when available), "system"
+        /// (SendInput) or "driver" (Interception). See InputPipeline.
+        /// </summary>
+        public string InputBackend { get; set; }
         public List<KeyMapping> Mappings { get; set; }
 
         /// <summary>Plugin file names in the order the user arranged them. Unknown names
@@ -240,6 +253,8 @@ namespace CapsLockLite
             DarkMode = false;
             TapAction = "caps";
             LongPressMs = 350;
+            WheelStep = 120;
+            InputBackend = "auto";
             Mappings = new List<KeyMapping>();
             PluginOrder = new List<string>();
             Macros = new List<Macro>();

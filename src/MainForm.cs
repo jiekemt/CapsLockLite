@@ -17,6 +17,8 @@ namespace CapsLockLite
         private AppSettings _settings;
         private HotkeyManager _engine;
         private ActionExecutor _executor;
+        private UiHost _uiHost;
+        private DispatcherThread _inputThread;
         private bool _exiting;
         private bool _syncing;
         private bool _balloonShown;
@@ -80,7 +82,9 @@ namespace CapsLockLite
         private MToggle _startupToggle;
         private MToggle _minimizedToggle;
         private MComboBox _tapCombo;
+        private MComboBox _inputBackend;
         private MNumberBox _longPress;
+        private MNumberBox _wheelStep;
         private Label _configPath;
         private Label _accentSwatch;
         private int _settingsSection;
@@ -692,12 +696,21 @@ namespace CapsLockLite
                 menu.AddItem("编辑…", "Enter", delegate { EditMapping(row.Mapping); });
                 menu.AddItem(row.Mapping.Enabled ? "停用" : "启用", "Space",
                     delegate { ToggleRow(row); });
+                menu.AddSeparator();
+                menu.AddItem("复制", "Ctrl+C", delegate { CopySelectedRows(); });
+                menu.AddItem("剪切", "Ctrl+X", delegate { CutSelectedRows(); });
+                menu.AddItem("粘贴", "Ctrl+V", delegate { PasteRows(); }, HasRowClipboard);
+                menu.AddSeparator();
                 menu.AddItem("删除", "Del", delegate { DeleteRow(row); });
             }
             else
             {
                 menu.AddItem("启用选中 (" + rows.Count + ")", "", delegate { SetRowsEnabled(SelectedRows, true); });
                 menu.AddItem("停用选中 (" + rows.Count + ")", "", delegate { SetRowsEnabled(SelectedRows, false); });
+                menu.AddSeparator();
+                menu.AddItem("复制选中 (" + rows.Count + ")", "Ctrl+C", delegate { CopySelectedRows(); });
+                menu.AddItem("剪切选中 (" + rows.Count + ")", "Ctrl+X", delegate { CutSelectedRows(); });
+                menu.AddItem("粘贴", "Ctrl+V", delegate { PasteRows(); }, HasRowClipboard);
                 menu.AddSeparator();
                 menu.AddItem("删除选中 (" + rows.Count + ")", "Del", delegate { DeleteSelected(); });
             }
@@ -718,6 +731,8 @@ namespace CapsLockLite
             menu.AddItem("新增快捷键", "Ctrl+N", delegate { AddMapping(); });
             if (_list.Items.Count > 0)
                 menu.AddItem("全选", "Ctrl+A", delegate { _list.SelectAll(); });
+            // Paste needs no selection: the rows land at the end of the list.
+            menu.AddItem("粘贴", "Ctrl+V", delegate { PasteRows(); }, HasRowClipboard);
             menu.AddSeparator();
             menu.AddItem("搜索快捷键…", "Ctrl+F", delegate { _search.Inner.Focus(); });
             menu.AddItem("刷新列表", "F5", delegate { RefreshList(); ShowStatus("列表已刷新", MInfoSeverity.Info); });
@@ -1019,6 +1034,9 @@ namespace CapsLockLite
             if (_engine == null) return;
             _engine.UpdateSettings(_settings);
             _engine.Stop();
+            // Keys held by the previous backend have been released through it by
+            // Stop(); only now is it safe to switch the sink.
+            RunOnInputAndWait(delegate { InputPipeline.Apply(_settings); });
             if (_settings.Enabled) _engine.Start();
             UpdateStatusUi();
         }
@@ -1263,9 +1281,9 @@ namespace CapsLockLite
         {
             using (ConfigFolderForm dialog = new ConfigFolderForm(ConfigStore.EnsureDirectory()))
             {
-                PauseEngine();
-                try { dialog.ShowDialog(this); }
-                finally { ResumeEngine(); }
+                // The Caps layer keeps working while this window is open: opening a
+                // configuration page must not take the user's shortcuts away.
+                dialog.ShowDialog(this);
                 if (dialog.Changed) ReloadFromDisk();
             }
         }
@@ -1390,17 +1408,32 @@ namespace CapsLockLite
                 }
                 if (key == Keys.X || key == Keys.C || key == Keys.V)
                 {
-                    // Key-level clipboard: cut/copy the selected chord's shortcuts and
-                    // paste them onto another key. Typing into the search box keeps
-                    // the normal text editing behaviour.
+                    // Two clipboards live on this page, and the focused surface decides
+                    // which one the shortcut means: rows in the list move through the
+                    // row clipboard, a chord selected on the board goes through the key
+                    // clipboard. Typing into the search box keeps normal text editing.
                     bool typing = _search != null && _search.ContainsFocus;
-                    if (_currentPage == "keys" && !typing && HasKeyboardFilter
-                        && _selectedKey != Keys.None)
+                    if (_currentPage == "keys" && !typing)
                     {
-                        if (key == Keys.X) CutKeyBindings();
-                        else if (key == Keys.C) CopyKeyBindings();
-                        else PasteKeyBindings();
-                        return true;
+                        if (_list != null && _list.Focused && _list.SelectedCount > 0)
+                        {
+                            if (key == Keys.X) CutSelectedRows();
+                            else if (key == Keys.C) CopySelectedRows();
+                            else PasteRows();
+                            return true;
+                        }
+                        if (HasKeyboardFilter && _selectedKey != Keys.None)
+                        {
+                            if (key == Keys.X) CutKeyBindings();
+                            else if (key == Keys.C) CopyKeyBindings();
+                            else PasteKeyBindings();
+                            return true;
+                        }
+                        if (key == Keys.V && _list != null && _list.Focused)
+                        {
+                            PasteRows();
+                            return true;
+                        }
                     }
                 }
                 if (key == Keys.Z || key == Keys.Y)
@@ -1520,21 +1553,33 @@ namespace CapsLockLite
             _runtimeStarted = true;
 
             _engine = new HotkeyManager(_settings, Handle);
+            // These callbacks come from the hook thread now, so everything they touch
+            // is handed to the executor's own thread first.
             _engine.ActionTriggered += delegate(KeyMapping mapping)
             {
-                if (_executor != null) _executor.Enqueue(mapping);
+                ActionExecutor executor = _executor;
+                if (executor != null) executor.Enqueue(mapping);
             };
             _engine.HoldStarted += delegate(KeyMapping mapping)
             {
-                if (_executor != null) _executor.BeginKeyHold(mapping);
+                ActionExecutor executor = _executor;
+                if (executor != null) executor.Post(delegate { executor.BeginKeyHold(mapping); });
             };
             _engine.HoldRepeated += delegate(KeyMapping mapping)
             {
-                if (_executor != null) _executor.RepeatKeyHold(mapping);
+                ActionExecutor executor = _executor;
+                if (executor != null) executor.Post(delegate { executor.RepeatKeyHold(mapping); });
             };
             _engine.HoldEnded += delegate(KeyMapping mapping)
             {
-                if (_executor != null) _executor.EndKeyHold(mapping);
+                ActionExecutor executor = _executor;
+                if (executor != null) executor.Post(delegate { executor.EndKeyHold(mapping); });
+            };
+            _engine.UiPost = delegate(Action work)
+            {
+                if (IsDisposed) return;
+                if (InvokeRequired) BeginInvoke(work);
+                else work();
             };
             _engine.StatusChanged += delegate(string message, MInfoSeverity severity)
             {
@@ -1545,13 +1590,34 @@ namespace CapsLockLite
                 else
                     ShowStatus(message, severity);
             };
-            _executor = new ActionExecutor(this);
-            _macroRunner = new MacroRunner(_executor, this, delegate { return _settings.Macros; });
-            _macroRunner.StateChanged += delegate { OnMacroStateChanged(); };
-            _executor.MacroStartHook = StartMacroFromAction;
+            // Injection and macro scheduling get their own thread as well: the actions
+            // send input, wait for delivery and pace the steps, none of which should
+            // ever depend on the window being responsive.
+            _uiHost = new UiHost(this, this);
+            _inputThread = new DispatcherThread("CapsLockLite.Input");
+            DispatcherThread input = _inputThread;
+            ActionExecutor createdExecutor = null;
+            MacroRunner createdRunner = null;
+            input.Send(delegate
+            {
+                createdExecutor = new ActionExecutor(_uiHost, input.Anchor);
+                createdRunner = new MacroRunner(createdExecutor, _uiHost, delegate { return _settings.Macros; });
+                createdRunner.StateChanged += delegate { OnMacroStateChanged(); };
+                createdExecutor.MacroStartHook = StartMacroFromAction;
+                // A deferred mouse action wakes the macro runner the moment it is done,
+                // so a click step costs no extra timer tick.
+                createdExecutor.Idle += delegate
+                {
+                    MacroRunner current = createdRunner;
+                    if (current != null) current.Wake();
+                };
+            });
+            _executor = createdExecutor;
+            _macroRunner = createdRunner;
 
             MacroLibrary.RefreshCatalog(_settings.Macros);
             SyncStartup();
+            RunOnInputAndWait(delegate { InputPipeline.Apply(_settings); });
             if (_settings.Enabled) _engine.Start();
             UpdateStatusUi();
         }
@@ -1569,6 +1635,32 @@ namespace CapsLockLite
         /// usually the primary monitor's. Re-check once the window sits on its
         /// real monitor and rebuild at the correct scale if they differ.
         /// </summary>
+        /// <summary>Runs work on the input thread (injection + macro scheduling).</summary>
+        private void RunOnInput(Action work)
+        {
+            if (work == null) return;
+            DispatcherThread input = _inputThread;
+            if (input == null || input.IsOwnThread) work();
+            else input.Post(work);
+        }
+
+        /// <summary>Runs work on the input thread and waits for it (state switches).</summary>
+        private void RunOnInputAndWait(Action work)
+        {
+            if (work == null) return;
+            DispatcherThread input = _inputThread;
+            if (input == null || input.IsOwnThread) work();
+            else input.Send(work);
+        }
+
+        /// <summary>Runs work on the UI thread from anywhere.</summary>
+        private void RunOnUi(Action work)
+        {
+            if (work == null || IsDisposed) return;
+            if (InvokeRequired) BeginInvoke(work);
+            else work();
+        }
+
         private void EnsureDpi()
         {
             int dpi = DeviceDpi;
@@ -1911,10 +2003,19 @@ namespace CapsLockLite
             BringToFront();
         }
 
+        /// <summary>Releases every held key on the input thread.</summary>
+        private void ReleaseAllHolds()
+        {
+            PointerPin.Release();
+            ActionExecutor executor = _executor;
+            if (executor == null) return;
+            RunOnInputAndWait(delegate { executor.EndKeyHold(null); });
+        }
+
         private void ExitApplication()
         {
             _exiting = true;
-            if (_executor != null) _executor.EndKeyHold(null);
+            ReleaseAllHolds();
             if (_tray != null) _tray.Visible = false;
             Close();
         }
@@ -1928,7 +2029,7 @@ namespace CapsLockLite
         internal void StartPluginRestart()
         {
             _exiting = true;
-            if (_executor != null) _executor.EndKeyHold(null);
+            ReleaseAllHolds();
             if (_tray != null) _tray.Visible = false;
             ShowStatus("插件已卸载，正在重启 CapsLock Lite…", MInfoSeverity.Info);
             Program.RestartApplication();
@@ -2011,8 +2112,30 @@ namespace CapsLockLite
                     _tray.Dispose();
                     _tray = null;
                 }
-                if (_macroRunner != null) { _macroRunner.Dispose(); _macroRunner = null; }
-                if (_executor != null) { _executor.Dispose(); _executor = null; }
+                // The pointer must never stay pinned after the app is gone.
+                PointerPin.Release();
+                // The log writer is a background thread: flush what it still holds.
+                ConfigStore.FlushLog(1500);
+                DispatcherThread input = _inputThread;
+                _inputThread = null;
+                if (input != null)
+                {
+                    MacroRunner runner = _macroRunner;
+                    ActionExecutor executor = _executor;
+                    _macroRunner = null;
+                    _executor = null;
+                    input.Send(delegate
+                    {
+                        if (runner != null) runner.Dispose();
+                        if (executor != null) executor.Dispose();
+                    });
+                    input.Dispose();
+                }
+                else
+                {
+                    if (_macroRunner != null) { _macroRunner.Dispose(); _macroRunner = null; }
+                    if (_executor != null) { _executor.Dispose(); _executor = null; }
+                }
                 if (_engine != null) { _engine.Dispose(); _engine = null; }
                 PluginRuntime.Shutdown();
             }

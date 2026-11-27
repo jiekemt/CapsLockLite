@@ -681,6 +681,144 @@ namespace CapsLockLite
             ShowStatus("已把 " + pasted + " 条快捷键粘贴到 " + target, MInfoSeverity.Success);
         }
 
+        // ---- row clipboard (list entries, not a chord) ----------------------
+
+        private List<KeyMapping> _rowClipboard;
+        // Where a cut block came from, so "cut then paste" puts the rows back where
+        // they were instead of at the end. -1 means "paste after the selection".
+        private int _rowPasteIndex = -1;
+
+        private bool HasRowClipboard
+        {
+            get { return _rowClipboard != null && _rowClipboard.Count > 0; }
+        }
+
+        /// <summary>Copies every selected row so it can be pasted back as new rows.</summary>
+        private void CopySelectedRows()
+        {
+            List<MappingListItem> rows = SelectedRows;
+            if (rows.Count == 0)
+            {
+                ShowStatus("先选中要复制的快捷键", MInfoSeverity.Info);
+                return;
+            }
+            List<KeyMapping> source = new List<KeyMapping>();
+            foreach (MappingListItem row in rows) source.Add(row.Mapping);
+            _rowClipboard = MappingClipboard.Copy(source);
+            _rowPasteIndex = -1;
+            ShowStatus("已复制 " + _rowClipboard.Count + " 条快捷键", MInfoSeverity.Success);
+        }
+
+        /// <summary>Copies the selected rows and removes them; undo brings them back.</summary>
+        private void CutSelectedRows()
+        {
+            List<MappingListItem> rows = SelectedRows;
+            if (rows.Count == 0)
+            {
+                ShowStatus("先选中要剪切的快捷键", MInfoSeverity.Info);
+                return;
+            }
+            List<KeyMapping> source = new List<KeyMapping>();
+            foreach (MappingListItem row in rows) source.Add(row.Mapping);
+            PushMappingUndo("剪切快捷键");
+            _rowClipboard = MappingClipboard.Copy(source);
+            _rowPasteIndex = MappingClipboard.InsertIndex(MappingList, source[0]) - 1;
+            foreach (KeyMapping mapping in source) MappingList.Remove(mapping);
+            SaveAndApply();
+            RefreshList();
+            // RefreshList keeps a selection around; drop it so the next paste uses the
+            // cut position rather than landing after an unrelated first row.
+            if (_list != null)
+            {
+                _list.ClearSelection();
+                UpdateListCount();
+            }
+            ShowStatus("已剪切 " + source.Count + " 条快捷键", MInfoSeverity.Success);
+        }
+
+        /// <summary>
+        /// Pastes the row clipboard as new rows right after the last selected row (or
+        /// at the end when nothing is selected). The pasted rows stay selected, and a
+        /// duplicate chord is reported instead of silently shadowing the original.
+        /// </summary>
+        private void PasteRows()
+        {
+            if (!HasRowClipboard)
+            {
+                ShowStatus("剪贴板是空的", MInfoSeverity.Info);
+                return;
+            }
+            // A selected row is an explicit paste target; without one, a cut block
+            // returns to the place it was cut from.
+            List<MappingListItem> rows = SelectedRows;
+            KeyMapping anchor = rows.Count == 0 ? null : rows[rows.Count - 1].Mapping;
+            int index;
+            if (anchor != null) index = MappingClipboard.InsertIndex(MappingList, anchor);
+            else if (_rowPasteIndex >= 0) index = Math.Min(_rowPasteIndex, MappingList.Count);
+            else index = MappingList.Count;
+
+            PushMappingUndo("粘贴快捷键");
+            List<KeyMapping> pasted = MappingClipboard.PasteInto(MappingList, index, _rowClipboard);
+            _rowPasteIndex = index + pasted.Count;
+            SaveAndApply();
+            RefreshList();
+            int visible = SelectMappings(pasted);
+
+            // Count duplicated chords even when the pasted row ends up in front of its
+            // original: order decides which one fires, not whether they collide.
+            int duplicated = 0;
+            if (pasted.Count > 0)
+            {
+                HashSet<string> pastedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (KeyMapping mapping in pasted) pastedIds.Add(mapping.Id);
+                HashSet<string> others = new HashSet<string>(StringComparer.Ordinal);
+                foreach (KeyMapping mapping in MappingList)
+                {
+                    if (mapping == null || pastedIds.Contains(mapping.Id)) continue;
+                    if (!mapping.Enabled || mapping.Key == 0) continue;
+                    others.Add(MappingConflicts.Signature(mapping));
+                }
+                foreach (KeyMapping mapping in pasted)
+                {
+                    if (mapping == null || !mapping.Enabled || mapping.Key == 0) continue;
+                    if (others.Contains(MappingConflicts.Signature(mapping))) duplicated++;
+                }
+            }
+
+            string message = "已粘贴 " + pasted.Count + " 条快捷键";
+            if (visible == 0) message += "（被当前筛选隐藏，清空搜索即可看到）";
+            if (duplicated > 0)
+                message += "；其中 " + duplicated + " 条组合与已有快捷键重复，只有靠前的会触发";
+            ShowStatus(message, duplicated > 0 ? MInfoSeverity.Warning : MInfoSeverity.Success);
+        }
+
+        /// <summary>
+        /// Selects the rows of the given mappings when the current filter shows them.
+        /// Returns how many were visible, so the caller can tell a hidden paste from a
+        /// visible one.
+        /// </summary>
+        private int SelectMappings(List<KeyMapping> mappings)
+        {
+            if (_list == null || mappings == null || mappings.Count == 0) return 0;
+            HashSet<string> ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyMapping mapping in mappings)
+            {
+                if (mapping != null) ids.Add(mapping.Id);
+            }
+            List<int> indices = new List<int>();
+            for (int i = 0; i < _list.Items.Count; i++)
+            {
+                MappingListItem row = _list.Items[i] as MappingListItem;
+                if (row == null || !ids.Contains(row.Mapping.Id)) continue;
+                indices.Add(i);
+            }
+            if (indices.Count == 0) return 0;
+            _list.ApplySelection(indices, indices[0]);
+            _list.EnsureVisible(indices[0]);
+            UpdateListCount();
+            return indices.Count;
+        }
+
         private void ShowKeyboardMenu()
         {
             MPopupMenu menu = new MPopupMenu();

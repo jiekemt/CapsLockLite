@@ -375,6 +375,7 @@ namespace CapsLockLite
             else if (def.ParamKind == ActionParamKind.Text) label = "文本";
             else if (def.ParamKind == ActionParamKind.KeyCombo) label = "组合键";
             else if (def.ParamKind == ActionParamKind.MouseClick) label = "点击设置";
+            else if (def.ParamKind == ActionParamKind.MousePoint) label = "目标坐标";
             else if (def.ParamKind == ActionParamKind.Select) label = "选项";
 
             _paramCaption = Theme.MakeLabel(label, Theme.Body, Theme.TextSecondary,
@@ -450,9 +451,10 @@ namespace CapsLockLite
                     _paramHost.Controls.Add(_note);
                 }
             }
-            else if (def.ParamKind == ActionParamKind.MouseClick)
+            else if (def.ParamKind == ActionParamKind.MouseClick
+                || def.ParamKind == ActionParamKind.MousePoint)
             {
-                _point = new MMousePointField();
+                _point = new MMousePointField(def.ParamKind == ActionParamKind.MouseClick);
                 _point.Value = value;
                 _paramHost.Controls.Add(_point);
 

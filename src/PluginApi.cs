@@ -19,6 +19,8 @@ namespace CapsLockLite
         KeyCombo = 5,
         Folder = 6,
         MouseClick = 7,
+        /// <summary>A desktop coordinate with no button ("鼠标移动").</summary>
+        MousePoint = 9,
         /// <summary>
         /// One value out of a fixed list. The action must also implement
         /// <see cref="IPluginParamChoices"/> to declare the list; the editor then

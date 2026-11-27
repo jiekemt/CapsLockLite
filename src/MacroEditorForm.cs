@@ -774,6 +774,7 @@ namespace CapsLockLite
             _comboField.ComboChanged += delegate { if (_error != null) _error.Text = ""; };
             _card.Controls.Add(_comboField);
             _point = new MMousePointField();
+            _point.Visible = false;
             _card.Controls.Add(_point);
 
             // Added after the parameter editors so the dialog still opens with the
@@ -873,12 +874,14 @@ namespace CapsLockLite
             // uses (modifier chips + key capture + live preview), not a read-only
             // box that opens a second dialog.
             _comboField.SetBounds(fieldLeft, y, innerWidth, Theme.S(74));
-            _point.SetBounds(fieldLeft, y, innerWidth, Theme.S(112));
+            _point.SetBounds(fieldLeft, y, innerWidth,
+                _def.ParamKind == ActionParamKind.MousePoint ? Theme.S(64) : Theme.S(112));
             _area.SetBounds(fieldLeft, y, innerWidth, Theme.S(96));
             _browse.SetBounds(innerRight - browseButtonWidth, y - Theme.S(1), browseButtonWidth, Theme.S(32));
 
             int paramBottom = _def.ParamKind == ActionParamKind.Text ? y + Theme.S(96)
                 : _def.ParamKind == ActionParamKind.MouseClick ? y + Theme.S(112)
+                : _def.ParamKind == ActionParamKind.MousePoint ? y + Theme.S(64)
                 : _def.ParamKind == ActionParamKind.KeyCombo ? y + Theme.S(74)
                 : y + Theme.S(30);
             int descWidth = innerWidth;
@@ -951,9 +954,16 @@ namespace CapsLockLite
                     _paramLabel.Text = "选项";
                     break;
                 case ActionParamKind.MouseClick:
+                    _point.ClickOptions = true;
                     _point.Visible = true;
                     _point.Value = _step.Param;
                     _paramLabel.Text = "点击设置";
+                    break;
+                case ActionParamKind.MousePoint:
+                    _point.ClickOptions = false;
+                    _point.Visible = true;
+                    _point.Value = _step.Param;
+                    _paramLabel.Text = "目标坐标";
                     break;
                 case ActionParamKind.KeyCombo:
                     _comboField.Visible = true;
@@ -1029,6 +1039,7 @@ namespace CapsLockLite
                     _step.Param = _area.Text == null ? "" : _area.Text.Trim();
                     break;
                 case ActionParamKind.MouseClick:
+                case ActionParamKind.MousePoint:
                     _step.Param = _point.Value;
                     break;
                 case ActionParamKind.Select:
